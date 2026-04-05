@@ -1,0 +1,500 @@
+/**
+ * Chat Completions Handler with OpenAI SSE Streaming Support
+ * Properly implements streaming responses for compatibility with clients like Goose ACP
+ */
+
+const SSEStreamingHandler = require('../middleware/sse-streaming');
+
+class ChatCompletionsHandler {
+  constructor(providerManager, tracingService, costService, inferencingClient) {
+    this.providerManager = providerManager;
+    this.tracingService = tracingService;
+    this.costService = costService;
+    this.inferencingClient = inferencingClient;
+  }
+  
+  /**
+   * Handle chat completion request with streaming support
+   */
+  async handle(req, res) {
+    // Start request tracing
+    const { traceId, spanId } = this.tracingService.startTrace(req.body, {
+      clientId: req.headers['x-client-id'] || 'unknown',
+      clientIp: req.ip || req.connection.remoteAddress,
+      userAgent: req.headers['user-agent'],
+      routingStrategy: req.headers['x-routing-strategy'] || 'hybrid',
+      streaming: req.body.stream === true
+    });
+    
+    const requestStartTime = Date.now();
+    
+    try {
+      // Extract service context
+      const serviceId = req.headers['x-service-id'] || req.body._context?.serviceId || 'default-service';
+      const projectId = req.headers['x-project-id'] || req.body._context?.projectId || null;
+      let model = req.body.model;
+      
+      // Model aliasing for compatibility
+      model = this.applyModelAliasing(model);
+      req.body.model = model;
+      
+      console.log(`[Chat Completions] Request from ${serviceId}, model: ${model}, streaming: ${req.body.stream} [Trace: ${traceId}]`);
+      
+      // Auto-force tool usage when tools are present (fix for Goose ACP not setting tool_choice)
+      if (req.body.tools && req.body.tools.length > 0 && !req.body.tool_choice) {
+        req.body.tool_choice = 'auto';
+        console.log(`[Chat Completions] Auto-setting tool_choice='auto' for ${req.body.tools.length} tools`);
+      }
+      
+      if (Array.isArray(req.body.tools)) {
+        const normalizeSchema = (tool) => {
+          if (!tool || typeof tool !== 'object') return undefined;
+          if (tool.input_schema && typeof tool.input_schema === 'object') return tool.input_schema;
+          if (tool.inputSchema && typeof tool.inputSchema === 'object') return tool.inputSchema;
+          if (tool.parameters && typeof tool.parameters === 'object') return tool.parameters;
+          if (tool.schema && typeof tool.schema === 'object') return tool.schema;
+          if (tool.args && typeof tool.args === 'object') return tool.args;
+          return undefined;
+        };
+        req.body.tools = req.body.tools.map((tool) => {
+          if (!tool || typeof tool !== 'object') return tool;
+          if (tool.type === 'function' && tool.function && tool.function.name) return tool;
+          if (tool.type && !tool.function && tool.name && (tool.input_schema || tool.inputSchema)) return tool;
+          if (tool.name) {
+            const parameters = normalizeSchema(tool);
+            if (parameters) {
+              return {
+                type: 'function',
+                function: {
+                  name: tool.name,
+                  description: tool.description || '',
+                  parameters
+                }
+              };
+            }
+          }
+          if (tool.function && tool.function.name && !tool.function.parameters) {
+            const parameters = normalizeSchema(tool) || normalizeSchema(tool.function) || { type: 'object', properties: {} };
+            return {
+              type: 'function',
+              function: {
+                name: tool.function.name,
+                description: tool.function.description || tool.description || '',
+                parameters
+              }
+            };
+          }
+          return tool;
+        });
+      }
+
+      // Fetch API key if using AI Inferencing Service
+      await this.fetchProviderKey(req, serviceId, model);
+      
+      const requestOptions = {
+        strategy: req.headers['x-routing-strategy'] || 'hybrid',
+        enableFallback: false,
+        skipAliasing: req.headers['x-use-native-model'] === 'true' ||  req.headers['x-skip-aliasing'] === 'true',
+        stream: req.body.stream === true
+      };
+      
+      // Check if request wants streaming
+      if (req.body.stream === true) {
+        console.log(`[Chat Completions] Using SSE streaming mode [Trace: ${traceId}]`);
+        await this.handleStreamingResponse(req, res, requestOptions, traceId, requestStartTime);
+      } else {
+        console.log(`[Chat Completions] Using non-streaming mode [Trace: ${traceId}]`);
+        await this.handleNonStreamingResponse(req, res, requestOptions, traceId, requestStartTime);
+      }
+      
+    } catch (error) {
+      console.error('[Chat Completions] Request failed:', error?.message || error);
+      await this.handleError(req, res, error, traceId);
+    }
+  }
+  
+  /**
+   * Handle streaming response with SSE
+   */
+  async handleStreamingResponse(req, res, requestOptions, traceId, requestStartTime) {
+    // Set SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    
+    const timestamp = Math.floor(Date.now() / 1000);
+    let chunkCount = 0;
+    let fullText = '';
+    let provider = 'unknown';
+    let usage = null;
+    
+    try {
+      // Get provider connectivity
+      const connectivityStatus = await this.providerManager.getProviderConnectivityStatus();
+      
+      // Route request and get streaming response
+      const routingStartTime = Date.now();
+      
+      // For streaming, the provider manager doesn't support callbacks yet
+      // So we get the full response and convert it to SSE
+      const response = await this.providerManager.routeRequest(req.body, requestOptions);
+      const routingDuration = Date.now() - routingStartTime;
+      
+      // Update trace
+      if (response && response.routing) {
+        this.tracingService.updateRouting(traceId, {
+          provider: response.routing.provider,
+          strategy: requestOptions.strategy,
+          routingTime: routingDuration,
+        });
+      }
+      
+      // Always convert to SSE for streaming requests
+      console.log('[Chat Completions] Converting response to SSE streaming format...');
+      await this.convertNonStreamingToSSE(res, response, req.body.model, traceId, timestamp);
+      
+      // Record metrics
+      if (response && response.usage) {
+        await this.recordMetrics(traceId, response.routing?.provider, req.body.model, response.usage, requestStartTime, routingStartTime);
+      }
+      
+    } catch (error) {
+      console.error('[Chat Completions] Streaming error:', error);
+      const errorChunk = {
+        error: {
+          message: error.message || 'Internal error',
+          type: 'api_error'
+        }
+      };
+      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+      res.end();
+    }
+  }
+  
+  /**
+   * Convert non-streaming response to SSE format
+   * This is a fallback when the provider doesn't support native streaming
+   */
+  async convertNonStreamingToSSE(res, response, model, traceId, timestamp) {
+    // Extract content and tool_calls from response
+    const content = this.extractContentFromResponse(response);
+    const toolCalls = response?.choices?.[0]?.message?.tool_calls || null;
+    
+    // If there are tool calls, send them in a single chunk
+    if (toolCalls && toolCalls.length > 0) {
+      console.log(`[Chat Completions] SSE: Sending ${toolCalls.length} tool calls`);
+      
+      // First chunk with role
+      const roleChunk = {
+        id: `chatcmpl-${traceId}-0`,
+        object: 'chat.completion.chunk',
+        created: timestamp,
+        model: model,
+        choices: [{
+          index: 0,
+          delta: { role: 'assistant' },
+          finish_reason: null
+        }]
+      };
+      res.write(`data: ${JSON.stringify(roleChunk)}\n\n`);
+      
+      // Tool calls chunk
+      const toolCallChunk = {
+        id: `chatcmpl-${traceId}-1`,
+        object: 'chat.completion.chunk',
+        created: timestamp,
+        model: model,
+        choices: [{
+          index: 0,
+          delta: { tool_calls: toolCalls },
+          finish_reason: null
+        }]
+      };
+      res.write(`data: ${JSON.stringify(toolCallChunk)}\n\n`);
+      
+      // Final chunk
+      const finalChunk = {
+        id: `chatcmpl-${traceId}-final`,
+        object: 'chat.completion.chunk',
+        created: timestamp,
+        model: model,
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: 'tool_calls'
+        }]
+      };
+      res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+    
+    // Handle text content (original logic)
+    if (!content) {
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+    
+    // Split content into chunks (simulate streaming)
+    const words = content.split(' ');
+    const chunkSize = 3; // Words per chunk
+    
+    for (let i = 0; i < words.length; i += chunkSize) {
+      const chunkWords = words.slice(i, i + chunkSize);
+      const chunkText = chunkWords.join(' ') + (i + chunkSize < words.length ? ' ' : '');
+      
+      const chunk = {
+        id: `chatcmpl-${traceId}-${Math.floor(i / chunkSize)}`,
+        object: 'chat.completion.chunk',
+        created: timestamp,
+        model: model,
+        choices: [{
+          index: 0,
+          delta: i === 0 ? { role: 'assistant', content: chunkText } : { content: chunkText },
+          finish_reason: null
+        }]
+      };
+      
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      
+      // Small delay to simulate streaming
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    
+    // Send final chunk
+    const finalChunk = {
+      id: `chatcmpl-${traceId}-final`,
+      object: 'chat.completion.chunk',
+      created: timestamp,
+      model: model,
+      choices: [{
+        index: 0,
+        delta: {},
+        finish_reason: 'stop'
+      }]
+    };
+    
+    res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
+  
+  /**
+   * Handle non-streaming response (regular JSON)
+   */
+  async handleNonStreamingResponse(req, res, requestOptions, traceId, requestStartTime) {
+    const routingStartTime = Date.now();
+    const response = await this.providerManager.routeRequest(req.body, requestOptions);
+    const routingDuration = Date.now() - routingStartTime;
+    
+    // Update trace
+    if (response && response.routing) {
+      this.tracingService.updateRouting(traceId, {
+        provider: response.routing.provider,
+        strategy: requestOptions.strategy,
+        routingTime: routingDuration,
+      });
+    }
+    
+    // Record metrics
+    if (response && response.usage) {
+      await this.recordMetrics(traceId, response.routing?.provider, req.body.model, response.usage, requestStartTime, routingStartTime);
+    }
+    
+    // Add gateway metadata
+    const connectivityStatus = await this.providerManager.getProviderConnectivityStatus();
+    if (response && typeof response === 'object') {
+      response._gateway = {
+        version: '2.5.0',
+        timestamp: new Date().toISOString(),
+        traceId: traceId,
+        routing: response.routing || null,
+        connectivity: {
+          selectedProvider: response.routing?.provider,
+          providerStatus: connectivityStatus[response.routing?.provider] || 'unknown',
+          allProviders: connectivityStatus
+        }
+      };
+    }
+    
+    res.json(response);
+  }
+  
+  /**
+   * Apply model aliasing for compatibility
+   * NOTE: GPT→Claude translation removed after bypassing Goose ACP-CLI
+   * Now only maintains Claude internal model name consistency
+   */
+  applyModelAliasing(model) {
+    // Only Claude internal aliases for naming consistency
+    const MODEL_ALIASES = {
+      'claude-sonnet-4-0': 'claude-3-5-sonnet',  // Use stable model name
+      'claude-opus-4-0': 'claude-4-opus',
+      'claude-opus-4-1-0': 'claude-4-1-opus',
+    };
+    
+    if (MODEL_ALIASES[model]) {
+      console.log(`[Model Aliasing] ${model} → ${MODEL_ALIASES[model]}`);
+      return MODEL_ALIASES[model];
+    }
+    
+    // Pass through all other model names unchanged
+    return model;
+  }
+  
+  /**
+   * Fetch provider API key from AI Inferencing Service
+   */
+  async fetchProviderKey(req, serviceId, model) {
+    const ENABLE_AI_INFERENCING = process.env.ENABLE_AI_INFERENCING !== 'false';
+    
+    if (ENABLE_AI_INFERENCING && serviceId !== 'default-service') {
+      const provider = this.determineProviderFromModel(model);
+      
+      // Map workspace-ai and other agent IDs to goose-agent service
+      const SERVICE_ID_MAPPING = {
+        'workspace-ai': 'goose-agent',
+        'page-agent': 'goose-agent',
+        'dashboard-ai': 'goose-agent'
+      };
+      
+      const mappedServiceId = SERVICE_ID_MAPPING[serviceId] || serviceId;
+      
+      if (provider) {
+        try {
+          console.log(`[AI Inferencing] Fetching ${provider} key for service: ${serviceId} → ${mappedServiceId}`);
+          const apiKey = await this.inferencingClient.getKey(mappedServiceId, provider);
+          
+          if (apiKey) {
+            console.log(`[AI Inferencing] ✅ Key retrieved for ${serviceId}/${provider}`);
+            req.body._inferencingKey = { provider, apiKey, serviceId };
+          } else {
+            console.warn(`[AI Inferencing] ⚠️ No key found for ${serviceId}/${provider}`);
+          }
+        } catch (error) {
+          console.error(`[AI Inferencing] ❌ Error fetching key:`, error.message);
+        }
+      }
+    }
+  }
+  
+  /**
+   * Determine provider from model name
+   */
+  determineProviderFromModel(model) {
+    if (!model) return null;
+    const ml = model.toLowerCase();
+    
+    if (ml.includes('claude')) return 'anthropic';
+    if (ml.includes('gpt') || ml.includes('o1')) return 'openai';
+    if (ml.includes('gemini')) return 'google';
+    if (ml.includes('llama') || ml.includes('mistral')) return 'ollama';
+    
+    return null;
+  }
+  
+  /**
+   * Extract text content from chunk (provider-agnostic)
+   */
+  extractTextFromChunk(chunk) {
+    if (typeof chunk === 'string') return chunk;
+    if (chunk.content) return chunk.content;
+    if (chunk.text) return chunk.text;
+    if (chunk.delta?.content) return chunk.delta.content;
+    if (chunk.delta?.text) return chunk.delta.text;
+    return '';
+  }
+  
+  /**
+   * Extract content from full response
+   */
+  extractContentFromResponse(response) {
+    if (!response) return '';
+    if (typeof response === 'string') return response;
+    if (response.choices && response.choices[0]) {
+      const choice = response.choices[0];
+      if (choice.message?.content) return choice.message.content;
+      if (choice.text) return choice.text;
+    }
+    if (response.content) return response.content;
+    return '';
+  }
+  
+  /**
+   * Record metrics for cost tracking and tracing
+   */
+  async recordMetrics(traceId, provider, model, usage, requestStartTime, routingStartTime) {
+    if (!usage) return;
+    
+    try {
+      const cost = await this.costService.calculateCost(provider, model, usage);
+      await this.costService.recordCost(traceId, provider, model, usage, {});
+      
+      const totalLatency = Date.now() - requestStartTime;
+      const routingLatency = Date.now() - routingStartTime;
+      
+      this.tracingService.completeTrace(traceId, { usage, provider }, {
+        tokens: usage,
+        cost,
+        latency: {
+          routing: routingLatency,
+          provider: totalLatency - routingLatency,
+          total: totalLatency,
+        },
+      });
+    } catch (error) {
+      console.error('[Chat Completions] Error recording metrics:', error);
+    }
+  }
+  
+  /**
+   * Handle error response
+   */
+  async handleError(req, res, error, traceId) {
+    console.error('[Chat Completions] Error:', error?.message || error);
+    
+    // Record error in trace
+    this.tracingService.recordError(traceId, error, 500);
+    
+    // Get connectivity status
+    let connectivityStatus = {};
+    try {
+      connectivityStatus = await this.providerManager.getProviderConnectivityStatus() || {};
+    } catch (e) {
+      console.warn('[Chat Completions] Failed to fetch connectivity status:', e.message);
+    }
+    
+    const availableProviders = Object.entries(connectivityStatus)
+      .filter(([, status]) => status && status.connected)
+      .map(([provider]) => provider);
+    
+    const suggestion = availableProviders.length > 0
+      ? `Try using a model from available providers: ${availableProviders.join(', ')}`
+      : 'No providers are currently available.';
+    
+    res.status(500).json({
+      error: {
+        message: error?.message || 'Unknown error',
+        type: 'connectivity_error',
+        code: 'PROVIDER_UNAVAILABLE',
+        details: {
+          requestedModel: req?.body?.model,
+          connectivity: connectivityStatus,
+          availableProviders,
+          suggestion
+        }
+      },
+      _gateway: {
+        version: '2.5.0',
+        timestamp: new Date().toISOString(),
+        error: true,
+        connectivity: connectivityStatus
+      }
+    });
+  }
+}
+
+module.exports = ChatCompletionsHandler;

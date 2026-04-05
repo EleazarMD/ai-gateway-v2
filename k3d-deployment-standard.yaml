@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-gateway-v2
+  namespace: ai-homelab-unified
+  labels:
+    app: ai-gateway-v2
+    component: core
+    ecosystem: ai-homelab
+    version: "2.0.0"
+    last-updated: "2025-09-25"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-gateway-v2
+  template:
+    metadata:
+      labels:
+        app: ai-gateway-v2
+    spec:
+      containers:
+      - name: ai-gateway-v2
+        image: ai-gateway-v2:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 7777
+        - containerPort: 8777
+        env:
+        - name: NODE_ENV
+          value: "development"
+        - name: INTERNAL_PORT
+          value: "7777"
+        - name: EXTERNAL_PORT
+          value: "8777"
+        - name: POSTGRES_HOST
+          value: "host.k3d.internal"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          value: "ai_gateway_db"
+        - name: POSTGRES_USER
+          value: "eleazar"
+        - name: POSTGRES_PASSWORD
+          value: "ai_gateway_secure_2024"
+        - name: REDIS_HOST
+          value: "host.k3d.internal"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: AHIS_SERVER_URL
+          value: "http://ahis-service:8888"
+        - name: SKIP_DATABASE
+          value: "true"
+        - name: DEV_GATEWAY_NO_DB
+          value: "true"
+        - name: OLLAMA_HOST
+          value: "http://host.k3d.internal:11434"
+        - name: OLLAMA_API_KEY
+          value: ""
+        - name: API_KEY
+          value: "ai-gateway-api-key-2024"
+        - name: ADMIN_API_KEY
+          value: "ai-gateway-admin-key-2024"
+        - name: CORS_ORIGIN
+          value: "*"
+        - name: LOG_LEVEL
+          value: "info"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8777
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8777
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+# AI Gateway Internal Service (Service Mesh Access) - Port 7777
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-gateway-internal
+  namespace: ai-homelab-unified
+  labels:
+    app: ai-gateway-v2
+    port-type: internal
+    purpose: service-mesh
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP
+  selector:
+    app: ai-gateway-v2
+  ports:
+  - port: 7777
+    targetPort: 7777
+    protocol: TCP
+    name: internal
+
+---
+# AI Gateway External Service (LoadBalancer for Client Access) - Port 8777
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-gateway-external
+  namespace: ai-homelab-unified
+  labels:
+    app: ai-gateway-v2
+    port-type: external
+    purpose: ai-inference
+spec:
+  type: LoadBalancer
+  selector:
+    app: ai-gateway-v2
+  ports:
+  - port: 8777
+    targetPort: 8777
+    protocol: TCP
+    name: external

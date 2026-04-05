@@ -1,0 +1,230 @@
+# AI Gateway Dual-Port Kubernetes Deployment
+# Version: v2.1.0
+# Created: 2025-09-09
+# PORT_REGISTRY Compliant: ports 7777 (internal) and 8777 (external)
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-gateway
+  namespace: ai-homelab-unified
+  labels:
+    app: ai-gateway
+    component: core-ai-service
+    version: "2.2.1"
+    port-registry-compliant: "true"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ai-gateway
+  template:
+    metadata:
+      labels:
+        app: ai-gateway
+        version: "2.2.1"
+    spec:
+      containers:
+      - name: ai-gateway
+        image: ai-gateway:v2.2.1
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 7777
+          name: internal
+          protocol: TCP
+        - containerPort: 8777
+          name: external
+          protocol: TCP
+        env:
+        - name: INTERNAL_PORT
+          value: "7777"
+        - name: EXTERNAL_PORT
+          value: "8777"
+        - name: NODE_ENV
+          value: "production"
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-gateway-secrets
+              key: api-key
+        - name: ADMIN_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-gateway-secrets
+              key: admin-api-key
+        - name: OLLAMA_HOST
+          value: "http://host.k3d.internal:11434"
+        - name: PERPLEXITY_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-gateway-secrets
+              key: perplexity-api-key
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-gateway-secrets
+              key: openai-api-key
+              optional: true
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-gateway-secrets
+              key: anthropic-api-key
+              optional: true
+        - name: GOOGLE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: ai-gateway-secrets
+              key: google-api-key
+              optional: true
+        - name: CORS_ORIGIN
+          value: "*"
+        # Database Configuration - Unified Homelab Database
+        - name: DATABASE_HOST
+          value: "host.k3d.internal"
+        - name: DATABASE_PORT
+          value: "5432"
+        - name: DATABASE_NAME
+          value: "ai_gateway_db"
+        - name: DATABASE_USER
+          value: "eleazar"
+        - name: DATABASE_PASSWORD
+          value: ""
+        - name: POSTGRES_HOST
+          value: "host.k3d.internal"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          value: "ai_gateway_db"
+        - name: POSTGRES_USER
+          value: "eleazar"
+        - name: POSTGRES_PASSWORD
+          value: ""
+        - name: REDIS_HOST
+          value: "host.k3d.internal"
+        - name: REDIS_PORT
+          value: "6379"
+        # AHIS Integration
+        - name: AHIS_URL
+          value: "http://ahis-server.ai-homelab-unified.svc.cluster.local:8888"
+        - name: ENABLE_AHIS_INTEGRATION
+          value: "true"
+        # Disable Dashboard Dependencies (PostgreSQL-Only Mode)
+        - name: ENABLE_DASHBOARD_SYNC
+          value: "false"
+        - name: DASHBOARD_URL
+          value: ""
+        - name: CONFIG_SYNC_INTERVAL
+          value: "0"
+        - name: AHIS_SYNC_INTERVAL
+          value: "120000"
+        # Enhanced Configuration - Temporarily disabled to use in-memory provider setup
+        - name: ENABLE_ENHANCED_CONFIG
+          value: "false"
+        - name: CONFIG_PERSISTENCE_ENABLED
+          value: "true"
+        - name: SQLITE_PATH
+          value: "/data/ai-gateway-config.db"
+        - name: ENABLE_FALLBACK_MODE
+          value: "true"
+        - name: ENABLE_WEBSOCKET
+          value: "true"
+        - name: WEBSOCKET_PATH
+          value: "/ws"
+        volumeMounts:
+        - name: config-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8777
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8777
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8777
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 12
+      volumes:
+      - name: config-storage
+        persistentVolumeClaim:
+          claimName: ai-gateway-config-pvc
+
+---
+# AI Gateway Internal Service (Service Mesh Access) - Port 7777
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-gateway-internal
+  namespace: ai-homelab-unified
+  labels:
+    app: ai-gateway
+    port-type: internal
+    purpose: service-mesh
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP
+  selector:
+    app: ai-gateway
+  ports:
+  - port: 7777
+    targetPort: 7777
+    protocol: TCP
+    name: internal
+
+---
+# AI Gateway External Service (LoadBalancer for Client Access) - Port 8777
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-gateway-external
+  namespace: ai-homelab-unified
+  labels:
+    app: ai-gateway
+    port-type: external
+    purpose: ai-inference
+spec:
+  type: LoadBalancer
+  selector:
+    app: ai-gateway
+  ports:
+  - port: 8777
+    targetPort: 8777
+    protocol: TCP
+    name: external
+
+---
+# AI Gateway Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ai-gateway-secrets
+  namespace: ai-homelab-unified
+type: Opaque
+stringData:
+  api-key: "ai-gateway-api-key-2024"
+  admin-api-key: "ai-gateway-admin-key-2024"
+  perplexity-api-key: "pplx-your-perplexity-api-key-here"
+  openai-api-key: ""
+  anthropic-api-key: ""
+  google-api-key: ""

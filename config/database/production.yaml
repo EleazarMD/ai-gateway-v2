@@ -1,0 +1,33 @@
+# Production Environment Database Configuration
+# AWS Aurora PostgreSQL with High Availability
+
+provider: aurora
+host: ${DATABASE_HOST}
+port: 5432
+database: ai_gateway_prod
+user: ${DATABASE_USER}
+password: ${DATABASE_PASSWORD}
+
+ssl:
+  rejectUnauthorized: true
+  ca: ${DATABASE_SSL_CA}
+
+pool:
+  min: 10
+  max: 50
+  idleTimeoutMillis: 30000
+  connectionTimeoutMillis: 10000
+
+# High Availability Configuration
+failover: true
+readReplica: ${DATABASE_READ_REPLICA_URL}
+
+# Production monitoring
+logQueries: false
+logConnections: true
+enableMetrics: true
+enableHealthChecks: true
+
+# Backup and recovery
+backupRetention: 30
+pointInTimeRecovery: true

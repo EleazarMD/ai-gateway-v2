@@ -1,0 +1,130 @@
+{
+  "_comment": "MiniMax M2.5 Default Profile - 230B MoE optimized for agentic tasks, tool use, and browser automation. Replaces Haiku/Qwen3 as primary model. Anthropic and Gemini as backups only.",
+  "_modes": {
+    "fast": "All tasks use MiniMax M2.5 (free local model, excellent tool use)",
+    "deep": "External sources: web search, document analysis. Uses MiniMax with Gemini/Sonnet backup."
+  },
+  "routing_rules": [
+    {
+      "id": "browser_commerce_minimax",
+      "name": "Browser Commerce Tasks → MiniMax M2.5 (no safety restrictions)",
+      "priority": 2,
+      "condition": {
+        "allOf": [
+          {"field": "hasTools", "equals": true},
+          {
+            "anyOf": [
+              {"field": "operationType", "in": ["browser_automation", "web_ordering", "commerce"]},
+              {"field": "messageContent", "contains": "starbucks"},
+              {"field": "messageContent", "contains": "order"},
+              {"field": "messageContent", "contains": "browser"}
+            ]
+          }
+        ]
+      },
+      "targetProvider": "minimax-default",
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "openclaw_voice_chat",
+      "name": "OpenClaw Voice Chat → MiniMax M2.5 (excellent tool use, no refusals)",
+      "priority": 3,
+      "condition": {
+        "anyOf": [
+          {"field": "serviceId", "equals": "hyperspace-ios"},
+          {"field": "operationType", "equals": "voice_chat"}
+        ]
+      },
+      "targetProvider": "minimax-default",
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": ["anthropic-default", "google-default"],
+      "enabled": true
+    },
+    {
+      "id": "deep_mode_longcontext",
+      "name": "Deep Mode: Long-Context/Research → Gemini 3 Flash (1M ctx)",
+      "priority": 6,
+      "condition": {
+        "allOf": [
+          {"field": "mode", "equals": "deep"},
+          {
+            "anyOf": [
+              {"field": "operationType", "in": ["long_context", "document_analysis", "large_summarization", "research", "web_search"]},
+              {"field": "maxTokens", "greaterThan": 100000}
+            ]
+          }
+        ]
+      },
+      "targetProvider": "google-default",
+      "targetModel": "gemini-3-flash-preview",
+      "fallbackProviders": ["minimax-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier1_sonnet_complex",
+      "name": "Tier 1: Explicit Complex Reasoning ONLY → Sonnet 4.5 (backup only)",
+      "priority": 10,
+      "condition": {
+        "field": "operationType", "in": ["complex_reasoning", "deep_research"]
+      },
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-sonnet-4-5",
+      "fallbackProviders": ["minimax-default"],
+      "enabled": true
+    },
+    {
+      "id": "tool_calling_minimax",
+      "name": "Tool Calling → MiniMax M2.5 (primary for all tool use)",
+      "priority": 15,
+      "condition": {
+        "field": "hasTools", "equals": true
+      },
+      "targetProvider": "minimax-default",
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "fast_mode_minimax",
+      "name": "Fast Mode → MiniMax M2.5 (free, excellent performance)",
+      "priority": 16,
+      "condition": {
+        "field": "mode", "equals": "fast"
+      },
+      "targetProvider": "minimax-default",
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier4_gemini_longcontext",
+      "name": "Tier 4: Long-Context/Overflow → Gemini 3 Flash (1M ctx)",
+      "priority": 40,
+      "condition": {
+        "anyOf": [
+          {"field": "operationType", "in": ["long_context", "document_analysis", "large_summarization", "research"]},
+          {"field": "maxTokens", "greaterThan": 100000}
+        ]
+      },
+      "targetProvider": "google-default",
+      "targetModel": "gemini-3-flash-preview",
+      "fallbackProviders": ["minimax-default"],
+      "enabled": true
+    },
+    {
+      "id": "default_minimax_fallback",
+      "name": "Default: All tasks → MiniMax M2.5 (primary model)",
+      "priority": 100,
+      "condition": {},
+      "targetProvider": "minimax-default",
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": [
+        "anthropic-default",
+        "google-default"
+      ],
+      "enabled": true
+    }
+  ]
+}

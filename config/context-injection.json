@@ -1,0 +1,46 @@
+{
+  "description": "Prompt cost visibility and architectural documentation for the AI Gateway",
+  "version": "3.0",
+  "architecture": {
+    "principle": "The gateway NEVER mutates prompt content. Prompt assembly is OpenClaw's domain.",
+    "gatewayRole": [
+      "Route requests to the correct provider/model",
+      "Enforce daily budget caps",
+      "Audit and log prompt token overhead per tier",
+      "Warn when overhead exceeds tier-appropriate thresholds"
+    ],
+    "openclawRole": [
+      "Assemble system prompt from workspace files (SOUL.md, AGENTS.md, USER.md, MEMORY.md)",
+      "Read PIC-synced data from workspace files at session start",
+      "Decide what context to include based on the query type"
+    ]
+  },
+  "picSyncPipeline": {
+    "description": "PIC (Personal Identity Core) is a database service that syncs bidirectionally with OpenClaw workspace files",
+    "service": "personal-kg (port 8765)",
+    "syncService": "openclaw_memory_sync.py (every 5 min)",
+    "flow": {
+      "picToWorkspace": "PIC API → openclaw_memory_sync → USER_CONTEXT.md, pic_context.json → read by OpenClaw at session start",
+      "workspaceToPic": "OpenClaw SQLite memories → openclaw_memory_sync → PIC /api/pic/learn/observations",
+      "keyPoint": "PIC data is baked INTO workspace .md files via sync. The gateway sees normal system messages — not raw PIC."
+    }
+  },
+  "tokenBudgetAudit": {
+    "description": "Observe-only thresholds. Gateway logs warnings but does NOT truncate or strip content.",
+    "tiers": {
+      "sonnet":  { "tier": 1, "costPerMTok": 3.0,   "warnAboveTokens": 4000, "notes": "Most expensive — flag bloated prompts for manual optimization" },
+      "haiku":   { "tier": 2, "costPerMTok": 0.8,   "warnAboveTokens": 6000, "notes": "Cheaper but still paid — flag large prompts" },
+      "qwen":    { "tier": 3, "costPerMTok": 0,     "warnAboveTokens": null,  "notes": "Free local model — no budget concern" },
+      "gemini":  { "tier": 4, "costPerMTok": 0.075, "warnAboveTokens": null,  "notes": "1M context, very cheap — no budget concern" }
+    }
+  },
+  "futureOptimization": {
+    "description": "Prompt size reduction should happen at the SOURCE (OpenClaw workspace files), not in transit at the gateway",
+    "strategies": [
+      "Trim SOUL.md: remove voice/heartbeat/group-chat sections if not needed for the session type",
+      "Trim AGENTS.md: move verbose heartbeat/cron docs to a separate reference file",
+      "OpenClaw tier awareness: if OpenClaw knows the target model, it can assemble a lighter prompt",
+      "Anthropic prompt caching: cache the system prompt to amortize cost across turns"
+    ]
+  }
+}

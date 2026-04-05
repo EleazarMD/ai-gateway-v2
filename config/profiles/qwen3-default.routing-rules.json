@@ -1,0 +1,162 @@
+{
+  "_profile": "qwen3-default",
+  "_description": "Qwen3-32B as default model (free, local). Tiered: Deep+complex→Sonnet, Deep+research→Gemini, Fast→Qwen3, Tools→Haiku (Qwen3 hallucinates locators), Default→Qwen3",
+  "_updated": "2026-03-04",
+  "_warnings": [
+    "Qwen3 hallucinates aria-ref= browser locators — browser tool unreliable",
+    "Qwen3 rarely invokes web_search even when instructed",
+    "40K context window — long sessions may truncate"
+  ],
+  "routing_rules": [
+    {
+      "id": "deep_mode_complex",
+      "name": "Deep Mode: Complex/Agentic → Sonnet 4.5",
+      "priority": 5,
+      "condition": {
+        "allOf": [
+          {"field": "mode", "equals": "deep"},
+          {"anyOf": [
+            {"field": "complexity", "in": ["high", "medium"]},
+            {"field": "hasTools", "equals": true},
+            {"field": "operationType", "in": ["multi_step_workflow", "agentic", "complex_reasoning", "deep_research"]}
+          ]}
+        ]
+      },
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-sonnet-4-5",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "deep_mode_longcontext",
+      "name": "Deep Mode: Long-Context/Research → Gemini 3 Flash (1M ctx)",
+      "priority": 6,
+      "condition": {
+        "allOf": [
+          {"field": "mode", "equals": "deep"},
+          {"anyOf": [
+            {"field": "operationType", "in": ["long_context", "document_analysis", "large_summarization", "research", "web_search"]},
+            {"field": "maxTokens", "greaterThan": 20000},
+            {"field": "complexity", "equals": "low"}
+          ]}
+        ]
+      },
+      "targetProvider": "google-default",
+      "targetModel": "gemini-3-flash-preview",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "deep_mode_simple",
+      "name": "Deep Mode: Simple External Query → Gemini 3 Flash",
+      "priority": 7,
+      "condition": {"field": "mode", "equals": "deep"},
+      "targetProvider": "google-default",
+      "targetModel": "gemini-3-flash-preview",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier1_sonnet_complex",
+      "name": "Tier 1: Complex/Agentic → Sonnet 4.5",
+      "priority": 10,
+      "condition": {
+        "anyOf": [
+          {"field": "complexity", "equals": "high"},
+          {"field": "sensitivity", "in": ["high", "restricted", "critical"]},
+          {"field": "operationType", "in": ["multi_step_workflow", "agentic", "complex_reasoning", "deep_research"]},
+          {"field": "taskStream", "equals": "upstream"},
+          {"field": "tenantId", "exists": true}
+        ]
+      },
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-sonnet-4-5",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "fast_mode_tools",
+      "name": "Fast Mode: Tool-Calling → Haiku 4.5 (Qwen3 unreliable with tools)",
+      "priority": 15,
+      "condition": {
+        "allOf": [
+          {"field": "mode", "equals": "fast"},
+          {"field": "hasTools", "equals": true}
+        ]
+      },
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-haiku-4-5",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "fast_mode_chat",
+      "name": "Fast Mode: Simple Homelab Chat → Qwen3-32B (free)",
+      "priority": 16,
+      "condition": {"field": "mode", "equals": "fast"},
+      "targetProvider": "openai-qwen3-32b-local",
+      "targetModel": "qwen3-32b",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier2_tools_haiku",
+      "name": "Tier 2: Standard Tool-Calling → Haiku 4.5 (Qwen3 hallucinates locators)",
+      "priority": 20,
+      "condition": {
+        "allOf": [
+          {"field": "hasTools", "equals": true},
+          {"field": "complexity", "in": ["medium", "low"]}
+        ]
+      },
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-haiku-4-5",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier3_qwen_local",
+      "name": "Tier 3: Simple/Local Chat → Qwen3-32B (free, 40K ctx)",
+      "priority": 30,
+      "condition": {
+        "anyOf": [
+          {"field": "sensitivity", "in": ["restricted", "local_only"]},
+          {"allOf": [
+            {"field": "hasTools", "equals": false},
+            {"field": "complexity", "in": ["low", "medium"]},
+            {"field": "taskStream", "in": ["edge", "downstream"]}
+          ]}
+        ]
+      },
+      "targetProvider": "openai-qwen3-32b-local",
+      "targetModel": "qwen3-32b",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier4_gemini_longcontext",
+      "name": "Tier 4: Long-Context/Overflow → Gemini 3 Flash (1M ctx)",
+      "priority": 40,
+      "condition": {
+        "anyOf": [
+          {"field": "operationType", "in": ["long_context", "document_analysis", "large_summarization", "research"]},
+          {"field": "maxTokens", "greaterThan": 20000}
+        ]
+      },
+      "targetProvider": "google-default",
+      "targetModel": "gemini-3-flash-preview",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "default_qwen_fallback",
+      "name": "Default → Qwen3-32B (free, local)",
+      "priority": 100,
+      "condition": {},
+      "targetProvider": "openai-qwen3-32b-local",
+      "targetModel": "qwen3-32b",
+      "fallbackProviders": ["google-default", "anthropic-default"],
+      "enabled": true
+    }
+  ]
+}

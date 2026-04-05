@@ -1,0 +1,152 @@
+# AHIS Server Kubernetes Deployment
+# Version: v2.1.0
+# Created: 2025-09-09
+# PORT_REGISTRY Compliant: port 8888
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ahis-server
+  namespace: ai-homelab-unified
+  labels:
+    app: ahis-server
+    component: core-infrastructure-service
+    version: "2.1.0"
+    port-registry-compliant: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ahis-server
+  template:
+    metadata:
+      labels:
+        app: ahis-server
+        version: "2.1.0"
+    spec:
+      containers:
+      - name: ahis-server
+        image: ahis-server:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8888
+          name: http
+          protocol: TCP
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "8888"
+        - name: KUBERNETES_DEPLOYMENT
+          value: "true"
+        - name: CLUSTER_TYPE
+          value: "k3d"
+        # Database Configuration - Unified Homelab Database
+        - name: POSTGRES_ENABLED
+          value: "true"
+        - name: POSTGRES_HOST
+          value: "host.docker.internal"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          value: "ahis_db"
+        - name: POSTGRES_USER
+          value: "eleazar"
+        - name: POSTGRES_PASSWORD
+          value: ""
+        - name: DATABASE_URL
+          value: "postgresql://eleazar@host.docker.internal:5432/ahis_db?schema=public&sslmode=disable"
+        # Integration URLs
+        - name: AI_GATEWAY_URL
+          value: "http://ai-gateway-internal.ai-homelab-unified.svc.cluster.local:7777"
+        - name: KG_API_URL
+          value: "http://kg-api:8765"
+        - name: AI_TRUTH_ENGINE_URL
+          value: "http://ai-truth-engine:8890"
+        # Registry and File Paths
+        - name: ECOSYSTEM_ROOT
+          value: "/app"
+        - name: PORT_REGISTRY_PATH
+          value: "/app/data/PORT_REGISTRY.yml"
+        - name: PROJECT_REGISTRY_PATH
+          value: "/app/data/PROJECT_REGISTRY.yml"
+        volumeMounts:
+        - name: ahis-data
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8888
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8888
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8888
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 12
+      volumes:
+      - name: ahis-data
+        persistentVolumeClaim:
+          claimName: ahis-server-data-pvc
+
+---
+# AHIS Server Internal Service (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ahis-server
+  namespace: ai-homelab-unified
+  labels:
+    app: ahis-server
+    component: core-infrastructure-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8888
+    targetPort: 8888
+    protocol: TCP
+    name: http
+  selector:
+    app: ahis-server
+
+---
+# AHIS Server LoadBalancer Service (External Access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ahis-server-lb
+  namespace: ai-homelab-unified
+  labels:
+    app: ahis-server
+    component: core-infrastructure-service
+    service-type: loadbalancer
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 8888
+    targetPort: 8888
+    protocol: TCP
+    name: http
+    nodePort: 30888
+  selector:
+    app: ahis-server

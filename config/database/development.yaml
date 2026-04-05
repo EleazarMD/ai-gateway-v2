@@ -1,0 +1,26 @@
+# Development Environment Database Configuration
+# Local PostgreSQL@14 via Homebrew
+
+provider: postgresql
+host: localhost
+port: 5432
+database: ai_gateway_db
+user: eleazar
+password: ""
+
+ssl:
+  rejectUnauthorized: false
+
+pool:
+  min: 2
+  max: 10
+  idleTimeoutMillis: 30000
+  connectionTimeoutMillis: 10000
+
+# Development-specific settings
+failover: false
+readReplica: null
+
+# Logging and debugging
+logQueries: true
+logConnections: true

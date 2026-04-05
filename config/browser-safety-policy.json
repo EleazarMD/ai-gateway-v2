@@ -1,0 +1,61 @@
+{
+  "_comment": "Browser Safety Policy for OpenClaw Agent. Controls what browser actions require approval.",
+  "version": "1.0",
+  "enabled": true,
+  
+  "action_classifications": {
+    "read_only": {
+      "description": "No approval required - information gathering only",
+      "examples": ["checking order status", "reading prices", "viewing account info", "searching", "comparing products"],
+      "approval_required": false
+    },
+    "form_input": {
+      "description": "Approval recommended - entering data into forms",
+      "examples": ["filling shipping address", "entering search queries on shopping sites", "login forms"],
+      "approval_required": true,
+      "approval_message": "The agent wants to fill in a form. Please review the data before proceeding."
+    },
+    "financial_transaction": {
+      "description": "ALWAYS requires explicit approval - any money movement",
+      "examples": ["placing orders", "clicking 'Buy Now'", "submitting payment", "subscription signup", "adding to cart + checkout"],
+      "approval_required": true,
+      "approval_message": "⚠️ FINANCIAL ACTION: The agent wants to complete a purchase/payment. Amount: {amount}. Confirm?"
+    },
+    "account_modification": {
+      "description": "ALWAYS requires explicit approval - changing account settings",
+      "examples": ["changing password", "updating payment method", "deleting account", "changing email", "modifying subscriptions"],
+      "approval_required": true,
+      "approval_message": "⚠️ ACCOUNT CHANGE: The agent wants to modify your account settings. Please review."
+    },
+    "destructive": {
+      "description": "BLOCKED by default - requires manual override",
+      "examples": ["deleting accounts", "canceling subscriptions", "removing payment methods"],
+      "approval_required": true,
+      "blocked_by_default": true,
+      "approval_message": "🛑 DESTRUCTIVE ACTION BLOCKED. Use manual override to proceed."
+    }
+  },
+
+  "pii_protection": {
+    "never_log": ["password", "credit_card", "cvv", "ssn", "social_security", "bank_account"],
+    "mask_in_logs": ["email", "phone", "address", "full_name"],
+    "never_screenshot_pages_containing": ["payment", "checkout", "billing", "credit card", "bank"]
+  },
+
+  "rate_limits": {
+    "browser_actions_per_minute": 20,
+    "form_submissions_per_hour": 10,
+    "financial_actions_per_day": 5
+  },
+
+  "domain_restrictions": {
+    "blocked_domains": [],
+    "financial_domains_require_approval": [
+      "*.amazon.com", "*.doordash.com", "*.ubereats.com", "*.grubhub.com",
+      "*.walmart.com", "*.target.com", "*.bestbuy.com",
+      "*.paypal.com", "*.venmo.com", "*.zelle.com",
+      "*.chase.com", "*.bankofamerica.com", "*.wellsfargo.com",
+      "*.apple.com/shop"
+    ]
+  }
+}

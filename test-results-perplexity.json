@@ -1,0 +1,88 @@
+{
+  "tests": [
+    {
+      "test": "AI Gateway Health Check",
+      "status": "PASSED",
+      "timestamp": "2025-08-18T04:05:13.922Z",
+      "details": {
+        "data": {
+          "version": "2.0.0",
+          "service": "AI Gateway External"
+        }
+      }
+    },
+    {
+      "test": "Provider Status Check",
+      "status": "PASSED",
+      "timestamp": "2025-08-18T04:05:15.887Z",
+      "details": {
+        "data": {
+          "totalProviders": 1,
+          "connectedProviders": 1,
+          "healthyProviders": 1
+        }
+      }
+    },
+    {
+      "test": "Dashboard Configuration Simulation",
+      "status": "PASSED",
+      "timestamp": "2025-08-18T04:05:15.912Z",
+      "details": {
+        "data": {
+          "note": "Configuration endpoint not implemented yet - this is expected"
+        }
+      }
+    },
+    {
+      "test": "Perplexity API Direct Test",
+      "status": "PASSED",
+      "timestamp": "2025-08-18T04:05:18.941Z",
+      "details": {
+        "data": {
+          "model": "sonar",
+          "responseLength": 612,
+          "usage": {
+            "prompt_tokens": 17,
+            "completion_tokens": 149,
+            "total_tokens": 166,
+            "search_context_size": "low",
+            "cost": {
+              "input_tokens_cost": 0,
+              "output_tokens_cost": 0,
+              "request_cost": 0.005,
+              "total_cost": 0.005
+            }
+          }
+        }
+      }
+    },
+    {
+      "test": "AI Gateway Perplexity Integration",
+      "status": "FAILED",
+      "timestamp": "2025-08-18T04:05:22.720Z",
+      "details": {
+        "error": "HTTP 500: [object Object]"
+      }
+    },
+    {
+      "test": "Models Endpoint Test",
+      "status": "PASSED",
+      "timestamp": "2025-08-18T04:05:22.733Z",
+      "details": {
+        "data": {
+          "totalModels": 0,
+          "perplexityModels": 0,
+          "availableModels": []
+        }
+      }
+    }
+  ],
+  "summary": {
+    "total": 6,
+    "passed": 5,
+    "failed": 1,
+    "startTime": "2025-08-18T04:05:13.885Z",
+    "endTime": "2025-08-18T04:05:22.733Z",
+    "duration": 8848
+  }
+}

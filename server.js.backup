@@ -1,0 +1,2598 @@
+#!/usr/bin/env node
+
+/**
+ * AI Gateway v2.0 - Dual Port Architecture
+ * Streamlined proxy server for AI model orchestration
+ * 
+ * Architecture: Single-process, dual Express apps
+ * Port 7777: Internal service mesh API (health, admin, service registration)
+ * Port 8777: External AI inference API (chat completions, models, Perplexity)
+ */
+
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { createProxyMiddleware } = require('http-proxy-middleware');
+const axios = require('axios');
+const http = require('http');
+const WebSocket = require('ws');
+const ServiceMeshIntegration = require('./src/service-mesh-integration');
+const DashboardConfigService = require('./src/services/dashboard-config-service');
+const AHISIntegrationService = require('./src/services/ahis-integration-service');
+const ProviderManager = require('./src/services/provider-manager');
+const APIKeyManager = require('./src/services/api-key-manager');
+const APIKeyRoutes = require('./src/services/api-key-routes');
+const AIInferencingClient = require('./src/clients/ai-inferencing-client');
+
+// Monitoring and observability services
+const RequestTracingService = require('./src/services/request-tracing-service');
+const CostTrackingService = require('./src/services/cost-tracking-service');
+const AlertService = require('./src/services/alert-service');
+const TraceStorage = require('./src/storage/trace-storage');
+const CostStorage = require('./src/storage/cost-storage');
+const AlertStorage = require('./src/storage/alert-storage');
+
+// Port configuration per PORT_REGISTRY
+const INTERNAL_PORT = process.env.INTERNAL_PORT || 7777;  // Service mesh
+const EXTERNAL_PORT = process.env.EXTERNAL_PORT || 8777;  // AI inference
+const API_KEY = process.env.API_KEY || 'ai-gateway-api-key-2024';
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'ai-gateway-admin-key-2024';
+const OLLAMA_HOST = process.env.OLLAMA_BASE_URL || process.env.OLLAMA_HOST || 'http://localhost:11434';
+// API Keys - will be fetched from Dashboard or fall back to env vars
+let PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
+let OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+let ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+let GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+
+// Fetch API keys from centralized Dashboard
+async function fetchAPIKeysFromDashboard() {
+  const DASHBOARD_URL = process.env.DASHBOARD_URL || 'http://localhost:8404';
+  const GATEWAY_API_KEY = process.env.API_KEY || 'ai-gateway-api-key-2024';
+  
+  try {
+    console.log('🔐 Fetching API keys from Dashboard...');
+    const response = await axios.get(`${DASHBOARD_URL}/api/ai-gateway/get-provider-keys`, {
+      headers: {
+        'X-API-Key': GATEWAY_API_KEY
+      },
+      timeout: 5000
+    });
+    
+    if (response.data && response.data.providers) {
+      const keys = response.data.providers;
+      
+      // Update API keys from centralized source
+      if (keys.google) {
+        GOOGLE_API_KEY = keys.google;
+        console.log('✅ Loaded Google API key from Dashboard');
+      }
+      if (keys.openai) {
+        OPENAI_API_KEY = keys.openai;
+        console.log('✅ Loaded OpenAI API key from Dashboard');
+      }
+      if (keys.anthropic) {
+        ANTHROPIC_API_KEY = keys.anthropic;
+        console.log('✅ Loaded Anthropic API key from Dashboard');
+      }
+      if (keys.perplexity) {
+        PERPLEXITY_API_KEY = keys.perplexity;
+        console.log('✅ Loaded Perplexity API key from Dashboard');
+      }
+      
+      console.log(`✅ Loaded ${response.data.count} provider API keys from Dashboard`);
+      return true;
+    }
+  } catch (error) {
+    console.warn('⚠️  Could not fetch API keys from Dashboard, using environment variables');
+    console.warn('   Error:', error.message);
+    return false;
+  }
+}
+
+// Initialize Provider Manager
+const providerManager = new ProviderManager();
+
+// Initialize AI Inferencing Client for multi-tenant key management
+const AI_INFERENCING_URL = process.env.AI_INFERENCING_URL || 'http://localhost:9000';
+const ENABLE_AI_INFERENCING = process.env.ENABLE_AI_INFERENCING === 'true';
+const inferencingClient = new AIInferencingClient({
+  baseUrl: AI_INFERENCING_URL,
+  cacheTTL: 60000 // 1 minute cache
+});
+
+if (ENABLE_AI_INFERENCING) {
+  console.log(`[AI Inferencing] Multi-tenant key management enabled: ${AI_INFERENCING_URL}`);
+} else {
+  console.log('[AI Inferencing] Multi-tenant disabled, using .env API keys');
+}
+
+// Initialize monitoring storage and services
+const dbConfig = {
+  host: process.env.POSTGRES_HOST || 'localhost',
+  port: parseInt(process.env.POSTGRES_PORT || '5432'),
+  database: process.env.POSTGRES_DB || 'ai_gateway_db',
+  user: process.env.POSTGRES_USER || 'postgres',
+  password: process.env.POSTGRES_PASSWORD,
+};
+
+// Storage layers (will initialize on first use)
+const traceStorage = new TraceStorage(dbConfig);
+const costStorage = new CostStorage(dbConfig);
+const alertStorage = new AlertStorage(dbConfig);
+
+// Monitoring services
+const tracingService = new RequestTracingService(traceStorage);
+const costService = new CostTrackingService(costStorage);
+const alertService = new AlertService(alertStorage);
+
+console.log('[Server] Monitoring services initialized (tracing, cost tracking, alerts)');
+
+// Initialize API Key Manager and routes
+let apiKeyManager;
+let apiKeyRoutes;
+
+// Create separate Express apps for each port
+const internalApp = express();  // Port 7777 - Service mesh
+const externalApp = express();  // Port 8777 - AI inference
+
+// Shared middleware setup
+const setupMiddleware = (app, portName) => {
+  app.use(cors({
+    origin: process.env.CORS_ORIGIN || '*',
+    credentials: true,
+    // Allow all headers to support A2A protocol and custom headers
+    allowedHeaders: '*',
+    exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset']
+  }));
+  
+  // Increase body size limit for large file uploads (PDFs, documents)
+  // Default: 100mb for document analysis, configurable via env var
+  const bodySizeLimit = process.env.BODY_SIZE_LIMIT || '100mb';
+  app.use(express.json({ limit: bodySizeLimit }));
+  app.use(express.urlencoded({ limit: bodySizeLimit, extended: true }));
+  
+  console.log(`[${portName}] Body size limit: ${bodySizeLimit}`);
+  
+  // Request logging with port identification
+  app.use((req, res, next) => {
+    console.log(`[${portName}] ${new Date().toISOString()} ${req.method} ${req.path}`);
+    next();
+  });
+};
+
+// Setup middleware for both apps
+setupMiddleware(internalApp, 'INTERNAL-7777');
+setupMiddleware(externalApp, 'EXTERNAL-8777');
+
+// Authentication middleware for external API (client access)
+// Authentication middleware for external API (client access)
+// v2.4.0: Added support for Authorization: Bearer tokens (industry standard)
+const authenticateExternal = (req, res, next) => {
+  // Accept both X-API-Key (custom) and Authorization: Bearer (standard)
+  const apiKey = req.headers['x-api-key'] || 
+                 (req.headers['authorization']?.startsWith('Bearer ') 
+                   ? req.headers['authorization'].slice(7) 
+                   : null);
+  
+  if (!apiKey || apiKey !== API_KEY) {
+    return res.status(401).json({ 
+      error: 'Unauthorized',
+      message: 'Valid X-API-Key or Authorization: Bearer header required'
+    });
+  }
+  next();
+};
+
+
+// Authentication middleware for internal API (service mesh)
+const authenticateInternal = (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  const adminKey = req.headers['x-admin-key'];
+  
+  if (adminKey && adminKey === ADMIN_API_KEY) {
+    req.isAdmin = true;
+    return next();
+  }
+  
+  if (!apiKey || apiKey !== API_KEY) {
+    return res.status(401).json({ 
+      error: 'Unauthorized',
+      message: 'Valid X-API-Key or X-Admin-Key header required'
+    });
+  }
+  
+  next();
+};
+
+// === INTERNAL PORT 7777 - SERVICE MESH API ===
+
+// Internal health check with detailed system info
+internalApp.get('/health', authenticateInternal, (req, res) => {
+  res.json({
+    status: 'healthy',
+    version: '2.4.0',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    port: INTERNAL_PORT,
+    type: 'internal-service-mesh',
+    memory: process.memoryUsage(),
+    services: {
+      ollama: OLLAMA_HOST,
+      perplexity: PERPLEXITY_API_KEY ? 'configured' : 'not-configured'
+    }
+  });
+});
+
+// Service mesh metrics endpoint
+internalApp.get('/metrics', authenticateInternal, (req, res) => {
+  res.json({
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    ports: {
+      internal: INTERNAL_PORT,
+      external: EXTERNAL_PORT
+    },
+    connections: {
+      ollama: OLLAMA_HOST,
+      perplexity_configured: !!PERPLEXITY_API_KEY
+    }
+  });
+});
+
+// Provider status endpoint for dashboard
+internalApp.get('/api/v1/providers/status', authenticateInternal, async (req, res) => {
+  try {
+    const connectivityStatus = await providerManager.getProviderConnectivityStatus();
+    
+    res.json({
+      success: true,
+      data: connectivityStatus,
+      timestamp: new Date().toISOString(),
+      summary: {
+        totalProviders: Object.keys(connectivityStatus).length,
+        connectedProviders: Object.values(connectivityStatus).filter(p => p.connected).length,
+        healthyProviders: Object.values(connectivityStatus).filter(p => p.status === 'healthy').length
+      }
+    });
+  } catch (error) {
+    console.error('[INTERNAL-7777] Provider status error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Provider status check failed',
+      message: error.message
+    });
+  }
+});
+
+// ================== OpenAI-compatible endpoint (/api without version) ==================
+// Debug middleware
+externalApp.use('/api/chat/completions', require('express').json(), (req, res, next) => {
+  console.log(`[EXTERNAL-8777] (compat) Chat completion request: ${req.method} ${req.url}`);
+  next();
+});
+
+// Reuse early normalizer
+externalApp.use('/api/chat/completions', (req, res, next) => {
+  try {
+    const original = req.body?.model;
+    if (typeof original === 'string') {
+      const ml = original.toLowerCase();
+      let normalized = original;
+      if (ml === 'gpt-4o' || ml.startsWith('gpt-4o-')) {
+        normalized = 'claude-4-sonnet';
+      } else if (ml === 'gpt-4o-mini' || ml.startsWith('gpt-4o-mini-')) {
+        normalized = 'claude-3-5-haiku';
+      } else if (ml === 'claude-sonnet-4-0') {
+        normalized = 'claude-4-sonnet';
+      }
+      if (normalized !== original) {
+        console.log(`[Model Normalizer][compat] ${original} → ${normalized}`);
+        req.body.model = normalized;
+      }
+    }
+  } catch (e) {
+    console.warn('[Model Normalizer][compat] Skipped normalization:', e.message);
+  }
+  return next();
+});
+
+externalApp.use('/api/chat/completions', authenticateExternal);
+
+externalApp.post('/api/chat/completions', authenticateExternal, async (req, res) => {
+  try {
+    console.log(`[Routing Precheck][compat] final model before routing: ${req.body?.model}`);
+    const response = await providerManager.routeRequest(req.body, {
+      strategy: req.headers['x-routing-strategy'] || 'hybrid'
+    });
+    return res.json(response);
+  } catch (error) {
+    console.error('[AI Gateway][compat] Chat completion failed:', error?.message || error);
+    return res.status(500).json({
+      error: {
+        message: error?.message || 'Routing failed',
+        type: 'routing_error'
+      },
+      _gateway: { version: '2.4.0', timestamp: new Date().toISOString(), error: true }
+    });
+  }
+});
+
+// Provider configuration endpoint for dashboard
+internalApp.get('/api/v1/providers/config', authenticateInternal, async (req, res) => {
+  try {
+    const providers = providerManager.getActiveProviders();
+    const providerConfigs = [];
+    
+    for (const providerId of providers) {
+      const provider = providerManager.getProvider(providerId);
+      if (provider) {
+        const models = await provider.getAvailableModels();
+        providerConfigs.push({
+          id: providerId,
+          name: provider.name,
+          type: provider.type,
+          status: provider.status,
+          models: Array.isArray(models) ? models : [],
+          capabilities: provider.capabilities,
+          features: provider.features
+        });
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: { providers: providerConfigs },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('[INTERNAL-7777] Provider config error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Provider configuration retrieval failed',
+      message: error.message
+    });
+  }
+});
+
+// Provider configuration management endpoint (POST)
+externalApp.post('/api/v1/config/providers', authenticateExternal, async (req, res) => {
+  try {
+    const { providers } = req.body;
+    
+    if (!Array.isArray(providers)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid request format',
+        message: 'Expected providers array in request body'
+      });
+    }
+    
+    console.log(`[EXTERNAL-8777] Applying provider configuration: ${providers.length} providers`);
+    
+    // Apply configuration to provider manager
+    await providerManager.applyConfiguration({ providers });
+    
+    // Get updated status
+    const connectivityStatus = await providerManager.getProviderConnectivityStatus();
+    const activeProviders = providerManager.getActiveProviders();
+    
+    res.json({
+      success: true,
+      message: 'Provider configuration applied successfully',
+      data: {
+        totalProviders: providers.length,
+        activeProviders: activeProviders.length,
+        connectivityStatus
+      },
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('[EXTERNAL-8777] Provider configuration error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Provider configuration failed',
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// === MONITORING AND OBSERVABILITY ENDPOINTS ===
+
+// Request traces endpoint
+internalApp.get('/api/v1/traces', authenticateInternal, async (req, res) => {
+  try {
+    const traces = await tracingService.queryTraces(req.query);
+    res.json({ traces: traces || [] });
+  } catch (error) {
+    console.error('[Traces API] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch traces', traces: [] });
+  }
+});
+
+// Single trace detail endpoint
+internalApp.get('/api/v1/traces/:id', authenticateInternal, async (req, res) => {
+  try {
+    const trace = await tracingService.getTrace(req.params.id);
+    if (!trace) {
+      return res.status(404).json({ error: 'Trace not found' });
+    }
+    res.json(trace);
+  } catch (error) {
+    console.error('[Trace Detail API] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch trace' });
+  }
+});
+
+// Cost analytics endpoint
+internalApp.get('/api/v1/costs/analytics', authenticateInternal, async (req, res) => {
+  try {
+    const analytics = await costService.getAnalytics(req.query);
+    res.json(analytics || { total: 0, breakdown: [] });
+  } catch (error) {
+    console.error('[Cost Analytics API] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch cost analytics', total: 0, breakdown: [] });
+  }
+});
+
+// Cost summary endpoint
+internalApp.get('/api/v1/costs/summary', authenticateInternal, async (req, res) => {
+  try {
+    const summary = await costService.getCostSummary(req.query.timeRange || '24h');
+    res.json(summary || { total: 0, totalTokens: 0, totalRequests: 0, byProvider: {}, byModel: {}, trend: [] });
+  } catch (error) {
+    console.error('[Cost Summary API] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch cost summary', total: 0, totalTokens: 0, totalRequests: 0, byProvider: {}, byModel: {}, trend: [] });
+  }
+});
+
+// Alerts endpoint
+internalApp.get('/api/v1/alerts', authenticateInternal, async (req, res) => {
+  try {
+    const alerts = alertService.getActiveAlerts();
+    const statistics = alertService.getStatistics();
+    res.json({ alerts: alerts || [], statistics });
+  } catch (error) {
+    console.error('[Alerts API] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch alerts', alerts: [], statistics: {} });
+  }
+});
+
+// Acknowledge alert endpoint
+internalApp.post('/api/v1/alerts/:id/acknowledge', authenticateInternal, async (req, res) => {
+  try {
+    await alertService.acknowledgeAlert(req.params.id, req.body.acknowledgedBy || 'system');
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[Alert Acknowledge API] Error:', error);
+    res.status(500).json({ error: 'Failed to acknowledge alert' });
+  }
+});
+
+// Admin configuration endpoint
+internalApp.get('/admin/config', (req, res) => {
+  if (!req.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  
+  res.json({
+    version: '2.4.0',
+    ports: {
+      internal: INTERNAL_PORT,
+      external: EXTERNAL_PORT
+    },
+    environment: {
+      ollama_host: OLLAMA_HOST,
+      perplexity_configured: !!PERPLEXITY_API_KEY,
+      cors_origin: process.env.CORS_ORIGIN || '*'
+    }
+  });
+});
+
+// Provider configuration management endpoint
+internalApp.put('/admin/providers/:providerId', authenticateInternal, async (req, res) => {
+  if (!req.isAdmin) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  
+  try {
+    const { providerId } = req.params;
+    const { enabled, ...updates } = req.body;
+    
+    console.log(`[AI Gateway] Admin request to ${enabled ? 'enable' : 'disable'} provider: ${providerId}`);
+    
+    if (!providerManager) {
+      return res.status(500).json({ error: 'Provider manager not initialized' });
+    }
+    
+    // Get current provider instance
+    const provider = providerManager.getProvider(providerId);
+    if (!provider) {
+      return res.status(404).json({ error: `Provider ${providerId} not found` });
+    }
+    
+    if (enabled === false) {
+      // Disable provider by unloading it
+      await providerManager.unloadProvider(providerId);
+      console.log(`[AI Gateway] Provider ${providerId} disabled (unloaded)`);
+    } else if (enabled === true) {
+      // Re-enable provider (would need provider config - for now just return current status)
+      console.log(`[AI Gateway] Provider ${providerId} enable requested - already active`);
+    }
+    
+    // Return updated provider status
+    const providerStatus = await providerManager.getProviderConnectivityStatus();
+    const updatedProvider = providerStatus[providerId] || { 
+      connected: enabled !== false, 
+      status: enabled === false ? 'disabled' : 'active',
+      lastUpdated: new Date().toISOString()
+    };
+    
+    res.json({
+      success: true,
+      provider: providerId,
+      status: updatedProvider,
+      action: enabled === false ? 'disabled' : 'enabled'
+    });
+    
+  } catch (error) {
+    console.error(`[AI Gateway] Provider configuration error:`, error.message);
+    res.status(500).json({ 
+      error: 'Provider configuration failed', 
+      message: error.message 
+    });
+  }
+});
+
+// Mount API Key routes after initialization (will be set up in server startup)
+let apiKeyRoutesSetup = false;
+
+// Service mesh service registration endpoint (for AHIS integration)
+internalApp.get('/api/services', authenticateInternal, (req, res) => {
+  res.json({
+    id: 'ai-gateway-v2-dual-port',
+    name: 'AI Gateway v2.3',
+    version: '2.4.0',
+    ports: {
+      internal: INTERNAL_PORT,
+      external: EXTERNAL_PORT
+    },
+    capabilities: [
+      'rest-api', 'streaming-api', 'chat-completions',
+      'service-mesh', 'perplexity-integration', 'openai-compatible',
+      'multi-speaker-tts', 'tts-routing'
+    ],
+    dependencies: ['ollama', 'perplexity-api', 'ai-inferencing-service'],
+    status: 'healthy'
+  });
+});
+
+// MCP (Model Context Protocol) endpoint for Knowledge Graph integration
+internalApp.post('/api/v1/mcp', authenticateInternal, async (req, res) => {
+  try {
+    const { server, command, args, request_id } = req.body;
+    
+    console.log(`[INTERNAL-7777] MCP Request: ${command}`, { server, request_id });
+    
+    // Route to Knowledge Graph service
+    if (server === 'knowledge-graph' || !server) {
+      const kgUrl = process.env.KG_MCP_URL || 'http://localhost:8766';
+      
+      try {
+        const axios = require('axios');
+        const response = await axios.post(`${kgUrl}/mcp`, req.body, {
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          timeout: 120000
+        });
+        
+        console.log(`[INTERNAL-7777] MCP Response from KG service:`, response.status);
+        res.json(response.data);
+        
+      } catch (kgError) {
+        console.error(`[INTERNAL-7777] KG service error:`, kgError.message);
+        
+        // Return a mock response for development
+        const mockResponse = {
+          result: `Mock response for ${command}: ${args?.query || args?.question || 'No query provided'}`,
+          confidence: 0.85,
+          reasoning: 'Knowledge Graph service unavailable, using mock response',
+          sources: [{
+            title: 'AI Gateway Mock',
+            url: 'http://localhost:7777',
+            relevance: 0.9
+          }],
+          metadata: {
+            mock: true,
+            timestamp: new Date().toISOString(),
+            request_id
+          }
+        };
+        
+        res.json(mockResponse);
+      }
+    } else {
+      res.status(400).json({
+        error: 'Unknown MCP server',
+        message: `Server '${server}' not supported`,
+        supported_servers: ['knowledge-graph']
+      });
+    }
+    
+  } catch (error) {
+    console.error(`[INTERNAL-7777] MCP endpoint error:`, error);
+    res.status(500).json({
+      error: 'MCP request failed',
+      message: error.message
+    });
+  }
+});
+
+// Internal 404 handler
+internalApp.use('*', (req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `Internal API endpoint ${req.method} ${req.originalUrl} not found`,
+    available_endpoints: [
+      '/health',
+      '/metrics', 
+      '/admin/config',
+      '/admin/providers/:id',
+      '/api/services',
+      '/api/v1/providers/status',
+      '/api/v1/providers/config',
+      '/api/v1/mcp'
+    ],
+    port: '7777',
+    type: 'internal-service-mesh'
+  });
+});
+
+// === EXTERNAL PORT 8777 - AI INFERENCE API ===
+
+// External health check endpoint (no authentication required for K8s probes)
+externalApp.get('/health', (req, res) => {
+  try {
+    res.status(200).json({ 
+      status: 'healthy', 
+      timestamp: new Date().toISOString(),
+      version: '2.4.0',
+      service: 'AI Gateway External',
+      uptime: process.uptime(),
+      port: EXTERNAL_PORT
+    });
+  } catch (error) {
+    console.error('[External Health] Error:', error);
+    res.status(500).json({
+      status: 'unhealthy',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Provider selection endpoint for testing
+externalApp.post('/api/providers/select', authenticateExternal, (req, res) => {
+  try {
+    const { model, capability, provider } = req.body;
+    
+    if (dashboardConfig) {
+      const config = dashboardConfig.getCurrentConfiguration();
+      const providers = config?.providers || [];
+      
+      // Simple provider selection logic for testing
+      let selectedProvider = providers.find(p => 
+        p.enabled && 
+        (model ? p.models?.includes(model) : true) &&
+        (capability ? p.capabilities?.includes(capability) : true) &&
+        (provider ? p.id === provider : true)
+      );
+      
+      if (!selectedProvider && providers.length > 0) {
+        selectedProvider = providers.find(p => p.enabled);
+      }
+      
+      if (selectedProvider) {
+        res.json({
+          success: true,
+          provider: selectedProvider,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        res.status(404).json({
+          success: false,
+          error: 'No suitable provider found',
+          criteria: { model, capability, provider },
+          timestamp: new Date().toISOString()
+        });
+      }
+    } else {
+      res.status(503).json({
+        success: false,
+        error: 'Dynamic provider selection not available',
+        timestamp: new Date().toISOString()
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Endpoint Discovery API - Comprehensive endpoint catalog
+externalApp.get('/api/v1/info', authenticateExternal, (req, res) => {
+  res.json({
+    service: 'AI Gateway',
+    version: '2.4.0',
+    type: 'ai-inference-proxy',
+    description: 'Unified AI inference gateway with multi-provider routing, TTS, and RAG capabilities',
+    ports: {
+      internal: INTERNAL_PORT,
+      external: EXTERNAL_PORT
+    },
+    endpoints: [
+      {
+        path: '/health',
+        method: 'GET',
+        authentication: 'none',
+        description: 'Service health check',
+        response: { status: 'healthy', version: '2.4.0', uptime: 'number', port: 'string' }
+      },
+      {
+        path: '/api/v1/info',
+        method: 'GET',
+        authentication: 'X-API-Key',
+        description: 'Endpoint discovery API - returns all available endpoints with parameters',
+        response: 'This response'
+      },
+      {
+        path: '/api/v1/chat/completions',
+        method: 'POST',
+        authentication: 'X-API-Key',
+        description: 'OpenAI-compatible chat completions with intelligent provider routing',
+        parameters: {
+          required: ['messages', 'model'],
+          optional: ['temperature', 'max_tokens', 'stream', 'top_p', 'frequency_penalty', 'presence_penalty', 'stop']
+        },
+        body_example: {
+          model: 'gpt-4',
+          messages: [{ role: 'user', content: 'Hello' }],
+          temperature: 0.7
+        },
+        features: ['streaming', 'function-calling', 'vision', 'provider-fallback']
+      },
+      {
+        path: '/api/v1/models',
+        method: 'GET',
+        authentication: 'X-API-Key',
+        description: 'List all available models across all providers',
+        response: {
+          object: 'list',
+          data: [{ id: 'model-name', provider: 'provider', capabilities: [] }]
+        }
+      },
+      {
+        path: '/api/v1/tts',
+        method: 'POST',
+        authentication: 'X-API-Key',
+        description: 'Text-to-Speech with parameter-based routing (single-speaker or multi-speaker)',
+        parameters: {
+          single_speaker: {
+            required: ['text', 'voice', 'model'],
+            optional: ['speed', 'pitch', 'volumeGainDb', 'sampleRateHertz']
+          },
+          multi_speaker: {
+            required: ['mode', 'script', 'speakerVoices', 'model'],
+            optional: []
+          }
+        },
+        body_examples: {
+          single_speaker: {
+            text: 'Hello world',
+            voice: 'Puck',
+            model: 'gemini-2.5-flash-preview-tts',
+            speed: 1.0,
+            pitch: 0
+          },
+          multi_speaker: {
+            mode: 'multi-speaker',
+            script: 'Host: Welcome!\\nGuest: Thanks!',
+            speakerVoices: [
+              { speaker: 'Host', voiceName: 'Puck' },
+              { speaker: 'Guest', voiceName: 'Charon' }
+            ],
+            model: 'gemini-2.5-flash-preview-tts'
+          }
+        },
+        supported_voices: ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede'],
+        response_type: 'audio/wav'
+      },
+      {
+        path: '/api/v1/perplexity/search',
+        method: 'POST',
+        authentication: 'X-API-Key',
+        description: 'RAG-enhanced search using Perplexity AI',
+        parameters: {
+          required: ['query'],
+          optional: ['model', 'max_tokens', 'temperature']
+        },
+        body_example: {
+          query: 'Latest AI developments',
+          model: 'sonar-pro',
+          max_tokens: 1000
+        }
+      },
+      {
+        path: '/api/v1/config/routing',
+        method: 'PUT',
+        authentication: 'X-API-Key',
+        description: 'Update routing configuration',
+        parameters: {
+          required: ['strategy'],
+          optional: ['fallbackChain', 'latencyThreshold']
+        }
+      },
+      {
+        path: '/api/v1/analytics/routing',
+        method: 'GET',
+        authentication: 'X-API-Key',
+        description: 'Get routing analytics and provider usage statistics',
+        query_params: {
+          optional: ['timeRange']
+        }
+      }
+    ],
+    capabilities: [
+      'multi-provider-routing',
+      'intelligent-fallback',
+      'streaming-support',
+      'multi-speaker-tts',
+      'rag-search',
+      'openai-compatible',
+      'cost-tracking',
+      'request-tracing'
+    ],
+    supported_providers: ['openai', 'google', 'anthropic', 'ollama', 'perplexity'],
+    timestamp: new Date().toISOString()
+  });
+});
+
+/**
+ * Helper function to determine provider from model name
+ */
+function determineProviderFromModel(model) {
+  if (!model) return null;
+  
+  const modelLower = model.toLowerCase();
+  
+  // OpenAI models
+  if (modelLower.startsWith('gpt-') || 
+      modelLower.startsWith('o1-') || 
+      modelLower.includes('davinci') ||
+      modelLower.includes('turbo')) {
+    return 'openai';
+  }
+  
+  // Google Gemini models
+  if (modelLower.startsWith('gemini-') || 
+      modelLower.includes('palm')) {
+    return 'google';
+  }
+  
+  // Anthropic Claude models
+  if (modelLower.startsWith('claude-')) {
+    return 'anthropic';
+  }
+  
+  // Ollama local models
+  if (modelLower.includes('llama') || 
+      modelLower.includes('mistral') ||
+      modelLower.includes('mixtral') ||
+      modelLower.includes('neural-chat') ||
+      modelLower.includes('codellama')) {
+    return 'ollama';
+  }
+  
+  // Perplexity models
+  if (modelLower.includes('sonar') || 
+      modelLower.includes('pplx')) {
+    return 'perplexity';
+  }
+  
+  return null;
+}
+
+// Debug middleware for chat completions
+// Ensure JSON is parsed before normalization/logging
+externalApp.use('/api/v1/chat/completions', require('express').json(), (req, res, next) => {
+  console.log(`[EXTERNAL-8777] Chat completion request received: ${req.method} ${req.url}`);
+  console.log(`[EXTERNAL-8777] Content-Type: ${req.headers['content-type']}`);
+  console.log(`[EXTERNAL-8777] API Key: ${req.headers['x-api-key'] ? 'present' : 'missing'}`);
+  console.log(`[EXTERNAL-8777] Service-ID: ${req.headers['x-service-id'] || 'not provided'}`);
+  next();
+});
+
+// Early model normalization so routing always sees Claude models for B1
+// Can be bypassed with X-Use-Native-Model: true header to access real OpenAI models
+externalApp.use('/api/v1/chat/completions', (req, res, next) => {
+  try {
+    // Check for bypass header
+    const useNativeModel = req.headers['x-use-native-model'] === 'true' || 
+                           req.headers['x-skip-aliasing'] === 'true';
+    
+    if (useNativeModel) {
+      console.log(`[Model Normalizer] Skipping aliasing (X-Use-Native-Model: true) - using model as-is: ${req.body?.model}`);
+      return next();
+    }
+
+    const original = req.body?.model;
+    if (typeof original === 'string') {
+      const ml = original.toLowerCase();
+      let normalized = original;
+      if (ml === 'gpt-4o' || ml.startsWith('gpt-4o-')) {
+        normalized = 'claude-4-sonnet';
+      } else if (ml === 'gpt-4o-mini' || ml.startsWith('gpt-4o-mini-')) {
+        normalized = 'claude-3-5-haiku';
+      } else if (ml === 'claude-sonnet-4-0') {
+        normalized = 'claude-4-sonnet';
+      }
+      if (normalized !== original) {
+        console.log(`[Model Normalizer] ${original} → ${normalized}`);
+        req.body.model = normalized;
+      }
+    }
+  } catch (e) {
+    console.warn('[Model Normalizer] Skipped normalization:', e.message);
+  }
+  return next();
+});
+
+// Authentication for chat completions
+externalApp.use('/api/v1/chat/completions', authenticateExternal);
+
+// Chat completions endpoint with transparent error reporting
+externalApp.post('/api/v1/chat/completions', authenticateExternal, async (req, res) => {
+  // Start request tracing
+  const { traceId, spanId } = tracingService.startTrace(req.body, {
+    clientId: req.headers['x-client-id'] || 'unknown',
+    clientIp: req.ip || req.connection.remoteAddress,
+    userAgent: req.headers['user-agent'],
+    routingStrategy: req.headers['x-routing-strategy'] || 'hybrid',
+  });
+  
+  const requestStartTime = Date.now();
+  
+  try {
+    // Extract service context for multi-tenant key management
+    const serviceId = req.headers['x-service-id'] || req.body._context?.serviceId || 'default-service';
+    const projectId = req.headers['x-project-id'] || req.body._context?.projectId || null;
+    let model = req.body.model;
+    
+    // Model aliasing for Goose CLI compatibility
+    // Goose's OpenAI provider validates model names client-side, so we accept Goose-friendly names
+    // and route to the correct Claude models internally
+    const MODEL_ALIASES = {
+      // Goose Anthropic-friendly names -> internal canonical
+      'claude-sonnet-4-0': 'claude-4-sonnet',
+      'claude-opus-4-0': 'claude-4-opus',
+      'claude-opus-4-1-0': 'claude-4-1-opus',
+      // OpenAI names -> route to Anthropic (Option B1)
+      'gpt-4o': 'claude-4-sonnet',
+      'gpt-4o-mini': 'claude-3-5-haiku'
+    };
+    
+    // Also support versioned variants like gpt-4o-2024-08-06
+    if (typeof model === 'string') {
+      const ml = model.toLowerCase();
+      if (ml.startsWith('gpt-4o-')) {
+        console.log(`[Model Aliasing] ${model} → claude-4-sonnet`);
+        model = 'claude-4-sonnet';
+        req.body.model = model;
+      } else if (ml.startsWith('gpt-4o-mini-')) {
+        console.log(`[Model Aliasing] ${model} → claude-3-5-haiku`);
+        model = 'claude-3-5-haiku';
+        req.body.model = model;
+      }
+    }
+    
+    if (MODEL_ALIASES[model]) {
+      console.log(`[Model Aliasing] ${model} → ${MODEL_ALIASES[model]}`);
+      model = MODEL_ALIASES[model];
+      req.body.model = model; // Update request body for downstream processing
+    }
+    
+    console.log(`[AI Gateway] Request from service: ${serviceId}${projectId ? `, project: ${projectId}` : ''} [Trace: ${traceId}]`);
+    
+    // Fast-path: If model is a Claude model, directly execute with Anthropic provider
+    if (typeof model === 'string' && model.toLowerCase().startsWith('claude-')) {
+      try {
+        const provider = providerManager.getProviderForModel(model);
+        if (provider && typeof provider.processChatCompletion === 'function') {
+          console.log(`[AI Gateway] Direct execution via Anthropic provider for model: ${model}`);
+          const directResponse = await provider.processChatCompletion({
+            ...req.body,
+            model,
+            _inferencingKey: req.body._inferencingKey
+          });
+          return res.json(directResponse);
+        }
+      } catch (directErr) {
+        console.warn('[AI Gateway] Direct Anthropic execution failed, falling back to routing:', directErr.message);
+      }
+    }
+    
+    // If multi-tenant is enabled, fetch API key from AI Inferencing Service
+    if (ENABLE_AI_INFERENCING && serviceId !== 'default-service') {
+      const provider = determineProviderFromModel(model);
+      
+      if (provider) {
+        try {
+          console.log(`[AI Inferencing] Fetching ${provider} key for service: ${serviceId}`);
+          const apiKey = await inferencingClient.getKey(serviceId, provider);
+          
+          if (apiKey) {
+            console.log(`[AI Inferencing] ✅ Key retrieved for ${serviceId}/${provider} (cached: ${inferencingClient.cache.has(`${serviceId}:${provider}`)})`);
+            
+            // Override the provider's API key with the fetched key
+            // This will be used by the provider manager
+            req.body._inferencingKey = {
+              provider,
+              apiKey,
+              serviceId
+            };
+          } else {
+            console.warn(`[AI Inferencing] ⚠️  No key found for ${serviceId}/${provider}, falling back to .env`);
+          }
+        } catch (error) {
+          console.error(`[AI Inferencing] ❌ Error fetching key for ${serviceId}/${provider}:`, error.message);
+          // Continue with fallback to .env keys
+        }
+      }
+    }
+    
+    // Check if model aliasing should be bypassed
+    const skipAliasing = req.headers['x-use-native-model'] === 'true' || 
+                         req.headers['x-skip-aliasing'] === 'true';
+
+    const requestOptions = {
+      strategy: req.headers['x-routing-strategy'] || 'hybrid',
+      enableFallback: false, // Disable automatic fallbacks
+      skipAliasing: skipAliasing // Pass bypass flag to routing layers
+    };
+
+    console.log(`[AI Gateway] Processing chat completion with strategy: ${requestOptions.strategy} [Trace: ${traceId}]`);
+    
+    // Get provider connectivity status first
+    const connectivityStatus = await providerManager.getProviderConnectivityStatus();
+    
+    // Try intelligent routing
+    const routingStartTime = Date.now();
+    const response = await providerManager.routeRequest(req.body, requestOptions);
+    const routingDuration = Date.now() - routingStartTime;
+    
+    // Update trace with routing information
+    if (response && response.routing) {
+      tracingService.updateRouting(traceId, {
+        provider: response.routing.provider,
+        strategy: requestOptions.strategy,
+        routingTime: routingDuration,
+      });
+    }
+
+    // Calculate cost and record
+    if (response && response.usage) {
+      const cost = await costService.calculateCost(
+        response.routing?.provider || 'unknown',
+        req.body.model,
+        response.usage
+      );
+      
+      await costService.recordCost(traceId, response.routing?.provider || 'unknown', req.body.model, response.usage, {
+        clientId: req.headers['x-client-id'] || 'unknown',
+      });
+      
+      // Complete trace with success
+      tracingService.completeTrace(traceId, response, {
+        tokens: response.usage,
+        cost,
+        latency: {
+          routing: routingDuration,
+          provider: Date.now() - requestStartTime - routingDuration,
+          total: Date.now() - requestStartTime,
+        },
+      });
+    }
+    
+    // Add gateway metadata with connectivity info
+    if (response && typeof response === 'object') {
+      response._gateway = {
+        version: '2.4.0',
+        timestamp: new Date().toISOString(),
+        traceId: traceId,
+        routing: response.routing || null,
+        connectivity: {
+          selectedProvider: response.routing?.provider,
+          providerStatus: connectivityStatus[response.routing?.provider] || 'unknown',
+          allProviders: connectivityStatus
+        }
+      };
+    }
+
+    res.json(response);
+  } catch (error) {
+    console.error('[AI Gateway] Chat completion request failed:', error?.message || error);
+    if (error && error.stack) {
+      console.error('[AI Gateway] Chat completion stack:', error.stack);
+    }
+    
+    // Record error in trace
+    tracingService.recordError(traceId, error, 500);
+    
+    // Get detailed connectivity status for error response (safe defaults)
+    let connectivityStatus = {};
+    try {
+      connectivityStatus = (await providerManager.getProviderConnectivityStatus()) || {};
+    } catch (e) {
+      console.warn('[AI Gateway] Failed to fetch connectivity status:', e.message);
+    }
+    const entries = Array.isArray(Object.entries(connectivityStatus)) ? Object.entries(connectivityStatus) : [];
+    const availableProviders = entries
+      .filter(([, status]) => status && status.connected)
+      .map(([provider]) => provider);
+
+    const suggestion = Array.isArray(availableProviders) && availableProviders.length > 0
+      ? `Try using a model from available providers: ${availableProviders.join(', ')}`
+      : 'No providers are currently available. Check your API keys and network connectivity.';
+
+    res.status(500).json({
+      error: {
+        message: error?.message || 'Unknown error',
+        type: 'connectivity_error',
+        code: 'PROVIDER_UNAVAILABLE',
+        details: {
+          requestedModel: req?.body?.model,
+          connectivity: connectivityStatus,
+          availableProviders: availableProviders || [],
+          suggestion
+        }
+      },
+      _gateway: {
+        version: '2.4.0',
+        timestamp: new Date().toISOString(),
+        error: true,
+        connectivity: connectivityStatus
+      }
+    });
+  }
+});
+
+// ============================================================================
+// ANTHROPIC NATIVE API ENDPOINT
+// ============================================================================
+// Support Anthropic's native /v1/messages endpoint for clients like Goose CLI
+externalApp.post('/v1/messages', authenticateExternal, async (req, res) => {
+  const { traceId, spanId } = tracingService.startTrace(req.body, {
+    clientId: req.headers['x-client-id'] || 'unknown',
+    clientIp: req.ip || req.connection.remoteAddress,
+    userAgent: req.headers['user-agent'],
+    apiFormat: 'anthropic-native',
+  });
+  
+  const requestStartTime = Date.now();
+  
+  try {
+    const serviceId = req.headers['x-service-id'] || 'default-service';
+    const projectId = req.headers['x-project-id'] || null;
+    
+    // Anthropic native request has 'model' field directly
+    const model = req.body.model;
+    
+    console.log(`[Anthropic Native] Request from service: ${serviceId}, model: ${model} [Trace: ${traceId}]`);
+    console.log(`[Anthropic Native] Request body keys:`, Object.keys(req.body));
+    console.log(`[Anthropic Native] Full model value:`, JSON.stringify({model: req.body.model}));
+    
+    // Fetch API key from AI Inferencing if multi-tenant enabled
+    if (ENABLE_AI_INFERENCING && serviceId !== 'default-service') {
+      try {
+        console.log(`[AI Inferencing] Fetching anthropic key for service: ${serviceId}`);
+        const apiKey = await inferencingClient.getKey(serviceId, 'anthropic');
+        
+        if (apiKey) {
+          console.log(`[AI Inferencing] ✅ Key retrieved for ${serviceId}/anthropic`);
+          req.body._inferencingKey = {
+            provider: 'anthropic',
+            apiKey,
+            serviceId
+          };
+        }
+      } catch (error) {
+        console.error(`[AI Inferencing] ❌ Error fetching key:`, error.message);
+      }
+    }
+    
+    // Convert Anthropic request to internal format for provider manager
+    const internalRequest = {
+      model: model,
+      messages: req.body.messages,
+      max_tokens: req.body.max_tokens,
+      temperature: req.body.temperature,
+      system: req.body.system,
+      tools: req.body.tools,
+      stream: req.body.stream,
+      _inferencingKey: req.body._inferencingKey,
+      _anthropicNative: true // Flag for provider to return native format
+    };
+    
+    console.log(`[Anthropic Native] Sending to provider manager:`, JSON.stringify({
+      model: internalRequest.model,
+      hasMessages: !!internalRequest.messages,
+      max_tokens: internalRequest.max_tokens
+    }));
+    
+    console.log(`[Routing Precheck] final model before routing: ${internalRequest.model}`);
+    const response = await providerManager.routeRequest(internalRequest, {
+      strategy: 'hybrid',
+      traceId,
+      spanId
+    });
+    
+    // If the provider returned Anthropic native format, pass it through
+    // Otherwise, convert OpenAI format to Anthropic format
+    if (response._anthropicNative || response.type === 'message') {
+      res.json(response);
+    } else {
+      // Convert OpenAI format to Anthropic format
+      const anthropicResponse = {
+        id: response.id || `msg_${Date.now()}`,
+        type: 'message',
+        role: 'assistant',
+        content: response.choices?.[0]?.message?.content ? 
+          [{ type: 'text', text: response.choices[0].message.content }] : [],
+        model: response.model,
+        stop_reason: response.choices?.[0]?.finish_reason === 'stop' ? 'end_turn' : 'max_tokens',
+        usage: {
+          input_tokens: response.usage?.prompt_tokens || 0,
+          output_tokens: response.usage?.completion_tokens || 0
+        }
+      };
+      res.json(anthropicResponse);
+    }
+    
+    // Record successful trace
+    const requestDuration = Date.now() - requestStartTime;
+    tracingService.completeTrace(traceId, response, requestDuration);
+    
+    // Track costs
+    if (response.usage) {
+      await costTrackingService.recordRequest({
+        traceId,
+        serviceId,
+        model: response.model,
+        provider: 'anthropic',
+        usage: response.usage,
+        cost: response.cost || 0,
+        duration: requestDuration
+      });
+    }
+    
+  } catch (error) {
+    console.error('[Anthropic Native] Request failed:', error);
+    tracingService.recordError(traceId, error, 500);
+    
+    // Return Anthropic-format error
+    res.status(500).json({
+      type: 'error',
+      error: {
+        type: 'api_error',
+        message: error.message
+      }
+    });
+  }
+});
+
+// Routing analytics endpoint
+externalApp.get('/api/v1/analytics/routing', authenticateExternal, async (req, res) => {
+  try {
+    const timeRange = parseInt(req.query.timeRange) || 3600000; // Default: 1 hour
+    const analytics = providerManager.getRoutingAnalytics(timeRange);
+    
+    res.json({
+      success: true,
+      data: analytics,
+      timeRange: timeRange,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Fallback analytics endpoint
+externalApp.get('/api/v1/analytics/fallback', authenticateExternal, async (req, res) => {
+  try {
+    const analytics = providerManager.getFallbackAnalytics();
+    
+    res.json({
+      success: true,
+      data: analytics,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Provider connectivity status endpoint
+externalApp.get('/api/v1/providers/status', authenticateExternal, async (req, res) => {
+  try {
+    const connectivityStatus = await providerManager.getProviderConnectivityStatus();
+    
+    res.json({
+      success: true,
+      data: connectivityStatus,
+      timestamp: new Date().toISOString(),
+      summary: {
+        totalProviders: Object.keys(connectivityStatus).length,
+        connectedProviders: Object.values(connectivityStatus).filter(s => s.connected).length,
+        healthyProviders: Object.values(connectivityStatus).filter(s => s.status === 'healthy').length
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Comprehensive health status endpoint
+externalApp.get('/api/v1/health/comprehensive', authenticateExternal, async (req, res) => {
+  try {
+    const healthStatus = await providerManager.getComprehensiveHealthStatus();
+    
+    res.json({
+      success: true,
+      data: healthStatus,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('[Health Endpoint] Error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Routing configuration endpoint
+externalApp.get('/api/v1/config/routing', authenticateExternal, async (req, res) => {
+  try {
+    const routingEngine = providerManager.getRoutingEngine();
+    const config = routingEngine ? routingEngine.getConfig() : null;
+    
+    res.json({
+      success: true,
+      data: config,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Update routing configuration endpoint
+externalApp.put('/api/v1/config/routing', authenticateExternal, async (req, res) => {
+  try {
+    providerManager.updateRoutingConfig(req.body);
+    
+    res.json({
+      success: true,
+      message: 'Routing configuration updated',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Fallback configuration endpoint
+externalApp.put('/api/v1/config/fallback', authenticateExternal, async (req, res) => {
+  try {
+    providerManager.updateFallbackConfig(req.body);
+    
+    res.json({
+      success: true,
+      message: 'Fallback configuration updated',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Routing analytics endpoint
+externalApp.get('/api/v1/analytics/routing', authenticateExternal, async (req, res) => {
+  try {
+    const analytics = providerManager.getRoutingAnalytics();
+    
+    res.json({
+      success: true,
+      data: analytics,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Fallback analytics endpoint
+externalApp.get('/api/v1/analytics/fallback', authenticateExternal, async (req, res) => {
+  try {
+    const analytics = providerManager.getFallbackAnalytics();
+    
+    res.json({
+      success: true,
+      data: analytics,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Fallback chain registration endpoint
+externalApp.post('/api/v1/config/fallback/chains', authenticateExternal, async (req, res) => {
+  try {
+    const { name, providers, description } = req.body;
+    
+    if (!name || !providers || !Array.isArray(providers)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid chain configuration. Name and providers array required.',
+        timestamp: new Date().toISOString()
+      });
+    }
+    
+    // Register the custom fallback chain
+    const fallbackManager = providerManager.fallbackManager;
+    if (fallbackManager && fallbackManager.registerFallbackChain) {
+      fallbackManager.registerFallbackChain(name, providers, description);
+    }
+    
+    res.json({
+      success: true,
+      message: `Fallback chain '${name}' registered successfully`,
+      chain: { name, providers, description },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Register custom fallback chain endpoint
+externalApp.post('/api/v1/fallback/chains', authenticateExternal, async (req, res) => {
+  try {
+    const { name, chain } = req.body;
+    providerManager.registerFallbackChain(name, chain);
+    
+    res.json({
+      success: true,
+      message: `Fallback chain '${name}' registered`,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Models endpoint - aggregated from all providers
+externalApp.get('/api/v1/models', authenticateExternal, (req, res) => {
+  console.log('[EXTERNAL-8777] Models endpoint called');
+  try {
+    const allModels = providerManager.getAllAvailableModels();
+    console.log(`[EXTERNAL-8777] Retrieved ${allModels.length} models`);
+    
+    // Transform to OpenAI-compatible format
+    const models = allModels.map(model => ({
+      id: model.id,
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: model.provider,
+      permission: [],
+      root: model.id,
+      parent: null,
+      capabilities: model.capabilities,
+      features: model.features,
+      pricing: model.pricing || model.cost
+    }));
+    
+    res.json({
+      object: 'list',
+      data: models
+    });
+  } catch (error) {
+    console.error('[EXTERNAL-8777] Models endpoint error:', error.message);
+    res.status(500).json({
+      error: {
+        message: 'Failed to fetch models',
+        type: 'api_error'
+      }
+    });
+  }
+});
+
+// Text-to-Speech endpoint - Google AI Studio Generative Language API (Gemini voices)
+// v2.3.0: Supports both single-speaker and multi-speaker TTS via parameter-based routing
+externalApp.post('/api/v1/tts', authenticateExternal, async (req, res) => {
+  const { 
+    // Single-speaker parameters
+    text, 
+    voice, 
+    speed = 1.0, 
+    pitch = 0, 
+    model,
+    // Multi-speaker parameters (v2.3.0)
+    mode,
+    script,
+    speakerVoices,
+    // Accept additional parameters for future extensibility
+    volumeGainDb,
+    sampleRateHertz,
+    ...additionalParams  // Capture any future parameters
+  } = req.body;
+  
+  // Detect multi-speaker vs single-speaker mode
+  const isMultiSpeaker = mode === 'multi-speaker' && script && speakerVoices;
+  
+  if (isMultiSpeaker) {
+    // === MULTI-SPEAKER TTS (v2.3.0) ===
+    console.log(`[EXTERNAL-8777] 🎭 Multi-speaker TTS request: ${speakerVoices.length} speakers, model=${model}`);
+    
+    // Validate multi-speaker parameters
+    if (!script || !speakerVoices || speakerVoices.length === 0) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Multi-speaker mode requires script and speakerVoices parameters',
+        required: ['script', 'speakerVoices'],
+        received: { script: !!script, speakerVoices: !!speakerVoices }
+      });
+    }
+    
+    if (!model) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Model parameter is required (e.g., google-gemini-2.5-pro-preview-tts)'
+      });
+    }
+    
+    // Route to AI Inferencing multi-speaker endpoint
+    const inferenceUrl = process.env.AI_INFERENCE_URL || 'http://localhost:9000';
+    const inferenceKey = process.env.AI_INFERENCE_SERVICE_KEY || 'ai-inferencing-service-key-2024';
+    
+    try {
+      console.log(`[EXTERNAL-8777] Routing to AI Inferencing: ${inferenceUrl}/api/tts/multi-speaker`);
+      
+      const response = await axios.post(`${inferenceUrl}/api/tts/multi-speaker`, {
+        script,
+        speakerVoices,
+        model
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Service-Key': inferenceKey
+        },
+        responseType: 'arraybuffer',
+        timeout: 600000  // 10 minutes for large podcast generation
+      });
+      
+      const audioBuffer = Buffer.from(response.data);
+      
+      res.set({
+        'Content-Type': 'audio/wav',
+        'Content-Length': audioBuffer.length,
+        'X-TTS-Mode': 'multi-speaker',
+        'X-Speaker-Count': speakerVoices.length.toString(),
+        'Cache-Control': 'public, max-age=31536000'
+      });
+      
+      console.log(`[EXTERNAL-8777] ✅ Multi-speaker TTS success: ${audioBuffer.length} bytes, ${speakerVoices.length} speakers`);
+      res.send(audioBuffer);
+      
+    } catch (error) {
+      console.error('[EXTERNAL-8777] Multi-speaker TTS error:', error.response?.data || error.message);
+      res.status(error.response?.status || 500).json({
+        error: 'Multi-speaker TTS Error',
+        message: error.response?.data?.error || error.message,
+        mode: 'multi-speaker'
+      });
+    }
+    
+  } else {
+    // === SINGLE-SPEAKER TTS (Original) ===
+    
+    if (!text) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Text parameter is required for single-speaker TTS'
+      });
+    }
+
+    if (!model) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Model parameter is required (e.g., gemini-2.5-pro-preview-tts)'
+      });
+    }
+
+    if (!voice) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'Voice parameter is required'
+      });
+    }
+
+    if (!GOOGLE_API_KEY) {
+      return res.status(500).json({
+        error: 'Configuration Error',
+        message: 'GOOGLE_API_KEY environment variable is required for Gemini TTS'
+      });
+    }
+
+    try {
+      console.log(`[EXTERNAL-8777] 🎤 Single-speaker TTS request: model=${model}, voice=${voice}, text="${text.substring(0, 50)}..."`);
+      if (Object.keys(additionalParams).length > 0) {
+        console.log(`[EXTERNAL-8777] Additional TTS params:`, additionalParams);
+      }
+      
+      // Build speech config with all supported parameters
+      const speechConfig = {
+        voice_config: {
+          prebuilt_voice_config: {
+            voice_name: voice
+          }
+        }
+      };
+      
+      // Add optional Gemini TTS parameters if provided
+      if (volumeGainDb !== undefined) {
+        speechConfig.volume_gain_db = volumeGainDb;
+      }
+      if (sampleRateHertz !== undefined) {
+        speechConfig.sample_rate_hertz = sampleRateHertz;
+      }
+      
+      // Call Google Generative Language API for Gemini TTS
+      // Gateway passes through all parameters - fully extensible
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GOOGLE_API_KEY}`,
+        {
+          contents: [{
+            parts: [{
+              text: text
+            }]
+          }],
+          generationConfig: {
+            response_modalities: ['AUDIO'],
+            speech_config: speechConfig
+          }
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (!response.data || !response.data.candidates || !response.data.candidates[0]) {
+        console.error('[EXTERNAL-8777] Gemini response structure:', JSON.stringify(response.data, null, 2));
+        throw new Error('No audio content in response from Gemini API');
+      }
+
+      // Extract audio data from inline_data
+      const candidate = response.data.candidates[0];
+      console.log(`[EXTERNAL-8777] Candidate structure:`, JSON.stringify({
+        finishReason: candidate.finishReason,
+        hasContent: !!candidate.content,
+        hasParts: !!candidate.content?.parts,
+        partsLength: candidate.content?.parts?.length,
+        partTypes: candidate.content?.parts?.map(p => Object.keys(p))
+      }));
+      
+      const audioPart = candidate.content?.parts?.find(part => part.inline_data || part.inlineData);
+      
+      if (!audioPart) {
+        console.error('[EXTERNAL-8777] No audio part found. Parts:', JSON.stringify(candidate.content?.parts, null, 2));
+        throw new Error('No audio data found in Gemini response');
+      }
+      
+      // Support both inline_data and inlineData (snake_case and camelCase)
+      const inlineData = audioPart.inline_data || audioPart.inlineData;
+      if (!inlineData) {
+        console.error('[EXTERNAL-8777] Audio part has no inline data:', JSON.stringify(audioPart, null, 2));
+        throw new Error('No inline data in audio part');
+      }
+
+      // Convert base64 to buffer (support both naming conventions)
+      const audioBuffer = Buffer.from(inlineData.data, 'base64');
+      const mimeType = inlineData.mime_type || inlineData.mimeType || 'audio/wav';
+
+      // Send audio
+      res.set({
+        'Content-Type': mimeType,
+        'Content-Length': audioBuffer.length,
+        'X-TTS-Mode': 'single-speaker',
+        'Cache-Control': 'public, max-age=31536000'
+      });
+      
+      console.log(`[EXTERNAL-8777] ✅ Single-speaker TTS success: ${audioBuffer.length} bytes (${mimeType}) with voice=${voice}, model=${model}`);
+      res.send(audioBuffer);
+
+    } catch (error) {
+      console.error('[EXTERNAL-8777] Gemini TTS error:', error.response?.data || error.message);
+      res.status(error.response?.status || 500).json({
+        error: 'Gemini TTS Error',
+        message: error.response?.data?.error?.message || error.message,
+        details: error.response?.data || null
+      });
+    }
+  }
+});
+
+// Enhanced Perplexity search endpoint with dynamic provider selection
+externalApp.post('/api/v1/perplexity/search', authenticateExternal, async (req, res) => {
+  const { query, model = 'sonar', stream = false } = req.body;
+  
+  if (!query) {
+    return res.status(400).json({
+      error: 'Bad Request',
+      message: 'Query parameter is required'
+    });
+  }
+
+  // Use dynamic provider selection if available
+  if (dashboardConfig && dashboardConfig.isHealthy) {
+    try {
+      return await handleDynamicPerplexitySearch(req, res, dashboardConfig);
+    } catch (error) {
+      console.warn('[EXTERNAL-8777] Dynamic provider selection failed, falling back to static:', error.message);
+    }
+  }
+
+  // Fallback to static configuration
+  if (!PERPLEXITY_API_KEY) {
+    return res.status(500).json({
+      error: 'Configuration Error',
+      message: 'PERPLEXITY_API_KEY environment variable is required and no dynamic providers available'
+    });
+  }
+
+  try {
+    const perplexityRequest = {
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a helpful assistant that provides accurate, up-to-date information from web sources. Always cite your sources and provide comprehensive answers.'
+        },
+        {
+          role: 'user',
+          content: query
+        }
+      ],
+      max_tokens: req.body.maxTokens || 4000,
+      temperature: req.body.temperature || 0.2,
+      return_citations: true,
+      return_related_questions: true,
+      search_recency_filter: 'month',
+      stream
+    };
+
+    if (stream) {
+      // Set up SSE headers for streaming
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Cache-Control'
+      });
+
+      const perplexityResponse = await axios.post(
+        'https://api.perplexity.ai/chat/completions',
+        perplexityRequest,
+        {
+          headers: {
+            'Authorization': `Bearer ${PERPLEXITY_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          responseType: 'stream'
+        }
+      );
+
+      perplexityResponse.data.on('data', (chunk) => {
+        const lines = chunk.toString().split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            res.write(`${line}\n\n`);
+          }
+        }
+      });
+
+      perplexityResponse.data.on('end', () => {
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      perplexityResponse.data.on('error', (error) => {
+        console.error('[EXTERNAL-8777] Perplexity streaming error:', error);
+        res.write(`data: {"error": "Stream error: ${error.message}"}\n\n`);
+        res.end();
+      });
+
+    } else {
+      // Non-streaming response
+      const perplexityResponse = await axios.post(
+        'https://api.perplexity.ai/chat/completions',
+        perplexityRequest,
+        {
+          headers: {
+            'Authorization': `Bearer ${PERPLEXITY_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 120000
+        }
+      );
+
+      res.json(perplexityResponse.data);
+    }
+
+  } catch (error) {
+    console.error('[EXTERNAL-8777] Perplexity search error:', error);
+    
+    if (stream && !res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+    }
+    
+    const errorResponse = {
+      error: 'Perplexity API Error',
+      message: error.response?.data?.error?.message || error.message,
+      status: error.response?.status || 500
+    };
+
+    if (stream) {
+      res.write(`data: ${JSON.stringify(errorResponse)}\n\n`);
+      res.end();
+    } else {
+      res.status(errorResponse.status).json(errorResponse);
+    }
+  }
+});
+
+// External 404 handler
+externalApp.use('*', (req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `AI inference endpoint ${req.method} ${req.originalUrl} not found`,
+    available_endpoints: ['/health', '/api/v1/info', '/api/v1/chat/completions', '/api/v1/models', '/api/v1/perplexity/search'],
+    port: EXTERNAL_PORT,
+    type: 'external-ai-inference'
+  });
+});
+
+// Shared error handler
+const errorHandler = (error, req, res, next) => {
+  console.error('Server error:', error);
+  res.status(500).json({
+    error: 'Internal Server Error',
+    message: error.message
+  });
+};
+
+internalApp.use(errorHandler);
+externalApp.use(errorHandler);
+
+// === DUAL SERVER STARTUP ===
+
+// Global service mesh integration instance
+let serviceMesh = null;
+
+// Global dashboard configuration service instance
+let dashboardConfig = null;
+
+// Global AHIS integration service instance
+let ahisIntegration = null;
+
+/**
+ * Merge AHIS-discovered providers with dashboard configuration
+ */
+function mergeAHISProvidersWithDashboard() {
+  if (!ahisIntegration || !dashboardConfig) {
+    return;
+  }
+
+  try {
+    console.log('[CONFIG] Merging AHIS providers with dashboard configuration...');
+    
+    const ahisProviders = ahisIntegration.getPlatformProviders();
+    const currentConfig = dashboardConfig.getCurrentConfiguration();
+    
+    if (!currentConfig) {
+      console.warn('[CONFIG] No dashboard configuration available for merging');
+      return;
+    }
+
+    // Create a map of existing dashboard providers
+    const dashboardProviderMap = new Map();
+    (currentConfig.providers || []).forEach(provider => {
+      dashboardProviderMap.set(provider.id, provider);
+    });
+
+    // Merge AHIS providers with dashboard providers
+    const mergedProviders = [...currentConfig.providers];
+    let addedCount = 0;
+    let updatedCount = 0;
+
+    ahisProviders.forEach(ahisProvider => {
+      const existingProvider = dashboardProviderMap.get(ahisProvider.id);
+      
+      if (existingProvider) {
+        // Update existing provider with AHIS information
+        existingProvider.endpoint = ahisProvider.endpoint;
+        existingProvider.lastUpdated = ahisProvider.lastUpdated;
+        existingProvider.source = 'ahis_merged';
+        existingProvider.serviceId = ahisProvider.serviceId;
+        existingProvider.ports = ahisProvider.ports;
+        
+        // Merge capabilities
+        const combinedCapabilities = [...new Set([
+          ...(existingProvider.capabilities || []),
+          ...(ahisProvider.capabilities || [])
+        ])];
+        existingProvider.capabilities = combinedCapabilities;
+        
+        // Merge models
+        const combinedModels = [...new Set([
+          ...(existingProvider.models || []),
+          ...(ahisProvider.models || [])
+        ])];
+        existingProvider.models = combinedModels;
+        
+        updatedCount++;
+      } else {
+        // Add new AHIS provider
+        mergedProviders.push({
+          ...ahisProvider,
+          source: 'ahis'
+        });
+        addedCount++;
+      }
+    });
+
+    // Update the dashboard configuration with merged providers
+    const mergedConfig = {
+      ...currentConfig,
+      providers: mergedProviders,
+      lastSync: new Date().toISOString(),
+      ahisIntegration: {
+        enabled: true,
+        lastMerge: new Date().toISOString(),
+        addedProviders: addedCount,
+        updatedProviders: updatedCount
+      }
+    };
+
+    // Apply the merged configuration
+    dashboardConfig.applyConfiguration(mergedConfig);
+    
+    console.log(`[CONFIG] AHIS merge complete: ${addedCount} added, ${updatedCount} updated`);
+    
+  } catch (error) {
+    console.error('[CONFIG] Error merging AHIS providers with dashboard:', error.message);
+  }
+}
+
+/**
+ * Handle Perplexity search with dynamic provider selection
+ */
+async function handleDynamicPerplexitySearch(req, res, configService) {
+  const { query, model = 'sonar', stream = false } = req.body;
+  
+  // Select appropriate provider for Perplexity search
+  const provider = configService.selectProvider({
+    capability: 'web_search',
+    model: model,
+    resourceId: 'perplexity_search'
+  });
+
+  if (!provider) {
+    throw new Error('No suitable provider found for Perplexity search');
+  }
+
+  console.log(`[EXTERNAL-8777] Using provider: ${provider.name} (${provider.type}) for Perplexity search`);
+
+  // Build request based on provider configuration
+  const perplexityRequest = {
+    model: model,
+    messages: [
+      {
+        role: 'system',
+        content: 'You are a helpful search assistant. Provide comprehensive answers with citations.'
+      },
+      {
+        role: 'user',
+        content: query
+      }
+    ],
+    max_tokens: req.body.maxTokens || provider.settings.maxTokens || 4000,
+    temperature: req.body.temperature || provider.settings.temperature || 0.2,
+    return_citations: true,
+    return_related_questions: true,
+    search_recency_filter: 'month',
+    stream: stream
+  };
+
+  // Apply provider-specific settings
+  if (provider.settings.topP !== undefined) {
+    perplexityRequest.top_p = provider.settings.topP;
+  }
+
+  // Determine API endpoint and headers
+  const apiUrl = provider.endpoint || 'https://api.perplexity.ai/chat/completions';
+  const headers = {
+    'Authorization': `Bearer ${provider.apiKey || PERPLEXITY_API_KEY}`,
+    'Content-Type': 'application/json',
+    ...provider.settings.customHeaders
+  };
+
+  const timeout = provider.settings.timeout || 120000;
+
+  try {
+    if (stream) {
+      // Handle streaming response
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Cache-Control'
+      });
+
+      const perplexityResponse = await axios.post(apiUrl, perplexityRequest, {
+        headers: headers,
+        timeout: timeout,
+        responseType: 'stream'
+      });
+
+      perplexityResponse.data.on('data', (chunk) => {
+        res.write(chunk);
+      });
+
+      perplexityResponse.data.on('end', () => {
+        res.end();
+      });
+
+      perplexityResponse.data.on('error', (error) => {
+        console.error(`[EXTERNAL-8777] Provider ${provider.name} streaming error:`, error);
+        res.write(`data: {"error": "Stream error: ${error.message}"}\n\n`);
+        res.end();
+      });
+
+    } else {
+      // Handle non-streaming response
+      const perplexityResponse = await axios.post(apiUrl, perplexityRequest, {
+        headers: headers,
+        timeout: timeout
+      });
+
+      // Add provider metadata to response
+      const enhancedResponse = {
+        ...perplexityResponse.data,
+        _provider: {
+          id: provider.id,
+          name: provider.name,
+          type: provider.type
+        }
+      };
+
+      res.json(enhancedResponse);
+    }
+
+    console.log(`[EXTERNAL-8777] Provider ${provider.name} completed Perplexity search successfully`);
+
+  } catch (error) {
+    console.error(`[EXTERNAL-8777] Provider ${provider.name} Perplexity search error:`, error.message);
+    
+    // Try fallback providers
+    const fallbackProviders = configService.getFallbackChain(provider.id);
+    
+    if (fallbackProviders.length > 0) {
+      console.log(`[EXTERNAL-8777] Attempting fallback with ${fallbackProviders.length} providers`);
+      
+      for (const fallbackProvider of fallbackProviders) {
+        if (fallbackProvider.capabilities.includes('web_search')) {
+          try {
+            console.log(`[EXTERNAL-8777] Trying fallback provider: ${fallbackProvider.name}`);
+            
+            // Recursive call with fallback provider (simplified)
+            const fallbackRequest = { ...req };
+            fallbackRequest.body._selectedProvider = fallbackProvider.id;
+            
+            return await handleDynamicPerplexitySearch(fallbackRequest, res, configService);
+            
+          } catch (fallbackError) {
+            console.error(`[EXTERNAL-8777] Fallback provider ${fallbackProvider.name} also failed:`, fallbackError.message);
+            continue;
+          }
+        }
+      }
+    }
+    
+    // All providers failed
+throw error;
+}
+
+}
+
+// Start internal server (service mesh) with WebSocket support
+const internalServer = http.createServer(internalApp);
+const wss = new WebSocket.Server({ 
+  noServer: true,
+  verifyClient: (info) => {
+    try {
+      // Verify API key from query parameter
+      const url = new URL(info.req.url, `http://${info.req.headers.host}`);
+      const apiKey = url.searchParams.get('apiKey');
+      console.log(`[WebSocket] Auth attempt - provided: ${apiKey ? 'present' : 'missing'}, expected: ${API_KEY ? 'present' : 'missing'}`);
+      return apiKey === API_KEY;
+    } catch (error) {
+      console.error('[WebSocket] Auth error:', error.message);
+      return false;
+    }
+  }
+});
+
+// Handle WebSocket upgrade manually
+internalServer.on('upgrade', (request, socket, head) => {
+  const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
+  
+  if (pathname === '/ws') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    socket.destroy();
+  }
+});
+
+// WebSocket connection handling
+wss.on('connection', (ws, req) => {
+  console.log('Dashboard WebSocket connected');
+  
+  // Store subscriptions for this connection
+  ws.subscriptions = new Set();
+  
+  // Send initial connection confirmation
+  ws.send(JSON.stringify({
+    type: 'connection_established',
+    data: { timestamp: new Date().toISOString() }
+  }));
+
+  // Handle subscription requests
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      if (data.type === 'subscribe') {
+        const channel = data.channel;
+        console.log('Dashboard subscribed to:', channel);
+        
+        // Add to subscriptions
+        ws.subscriptions.add(channel);
+        
+        // Acknowledge subscription
+        ws.send(JSON.stringify({
+          type: 'subscription_confirmed',
+          data: { channel: channel }
+        }));
+        
+        // Start sending data for this channel
+        if (channel === 'health') {
+          // Send immediate health data
+          sendHealthData(ws);
+          // Set up periodic health updates
+          if (!ws.healthInterval) {
+            ws.healthInterval = setInterval(() => {
+              if (ws.subscriptions.has('health') && ws.readyState === 1) {
+                sendHealthData(ws);
+              }
+            }, 10000);
+          }
+        } else if (channel === 'metrics') {
+          // Send immediate metrics data
+          sendMetricsData(ws);
+          // Set up periodic metrics updates
+          if (!ws.metricsInterval) {
+            ws.metricsInterval = setInterval(() => {
+              if (ws.subscriptions.has('metrics') && ws.readyState === 1) {
+                sendMetricsData(ws);
+              }
+            }, 30000);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('WebSocket message error:', error);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('Dashboard WebSocket disconnected');
+    // Clean up intervals
+    if (ws.healthInterval) clearInterval(ws.healthInterval);
+    if (ws.metricsInterval) clearInterval(ws.metricsInterval);
+  });
+
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
+  });
+});
+
+// Helper functions for sending data
+function sendHealthData(ws) {
+  if (ws.readyState !== 1) return;
+  
+  const healthData = {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    port: INTERNAL_PORT
+  };
+  
+  ws.send(JSON.stringify({
+    type: 'health',
+    data: healthData,
+    timestamp: new Date().toISOString()
+  }));
+}
+
+function sendMetricsData(ws) {
+  if (ws.readyState !== 1) return;
+  
+  const metricsData = {
+    timestamp: new Date().toISOString(),
+    requests: {
+      total: 0, // Would track actual requests
+      internal: 0,
+      external: 0
+    },
+    providers: {
+      ollama: 'connected',
+      perplexity: 'configured'
+    },
+    performance: {
+      cpu: process.cpuUsage(),
+      memory: process.memoryUsage()
+    }
+  };
+  
+  ws.send(JSON.stringify({
+    type: 'metrics',
+    data: metricsData,
+    timestamp: new Date().toISOString()
+  }));
+}
+
+internalServer.listen(INTERNAL_PORT, async () => {
+  console.log(`🔧 AI Gateway v2.0 INTERNAL (Service Mesh) running on port ${INTERNAL_PORT}`);
+  console.log(`   Health: http://localhost:${INTERNAL_PORT}/health`);
+  console.log(`   Metrics: http://localhost:${INTERNAL_PORT}/metrics`);
+  console.log(`   Providers: http://localhost:${INTERNAL_PORT}/api/v1/providers/status`);
+  console.log(`   Admin: http://localhost:${INTERNAL_PORT}/admin`);
+  console.log(`   WebSocket: ws://localhost:${INTERNAL_PORT}/ws`);
+
+  // Fetch API keys from centralized Dashboard FIRST
+  console.log('\n🔐 Fetching API keys from centralized Dashboard...');
+  await fetchAPIKeysFromDashboard();
+
+  console.log('\n🚀 Initializing Provider Manager...');
+  const providerLoadStart = Date.now();
+
+  // Initialize API Key Manager
+  try {
+    console.log('🔑 Initializing API Key Manager...');
+    
+    // Initialize with PostgreSQL wrapper and Redis client if available
+    const PostgreSQLWrapper = require('./src/storage/postgres-wrapper');
+    const postgresWrapper = new PostgreSQLWrapper({
+      host: process.env.POSTGRES_HOST || 'postgres-service',
+      port: process.env.POSTGRES_PORT || 5432,
+      database: process.env.POSTGRES_DB || 'ai_gateway',
+      user: process.env.POSTGRES_USER || 'ai_gateway',
+      password: process.env.POSTGRES_PASSWORD || 'ai_gateway_pass'
+    });
+    
+    await postgresWrapper.connect();
+    
+    apiKeyManager = new APIKeyManager({
+      postgresWrapper,
+      redisClient: null, // Redis integration can be added later
+      encryptionKey: process.env.API_KEY_ENCRYPTION_KEY
+    });
+    
+    await apiKeyManager.initialize();
+    
+    // Initialize API Key routes
+    apiKeyRoutes = new APIKeyRoutes(apiKeyManager, console);
+    
+    // Mount API Key routes now that they're initialized
+    if (!apiKeyRoutesSetup) {
+      // Add admin authentication middleware first
+      internalApp.use('/api/v1/keys', authenticateInternal, (req, res, next) => {
+        if (!req.isAdmin) {
+          return res.status(403).json({ error: 'Admin access required for API key management' });
+        }
+        next();
+      });
+      
+      // Then mount the API Key routes
+      internalApp.use('/api/v1/keys', apiKeyRoutes.getRouter());
+      apiKeyRoutesSetup = true;
+      console.log('✅ API Key routes mounted');
+    }
+    
+    console.log('✅ API Key Manager initialized');
+  } catch (error) {
+    console.error('API Key Manager initialization failed:', error);
+    console.warn('Continuing without API key management...');
+  }
+
+  // Initialize monitoring storage
+  try {
+    console.log('📊 Initializing monitoring storage (tracing, costs, alerts)...');
+    await traceStorage.initialize();
+    await costStorage.initialize();
+    await alertStorage.initialize();
+    console.log('✅ Monitoring storage initialized');
+  } catch (error) {
+    console.error('⚠️  Monitoring storage initialization failed:', error.message);
+    console.warn('   Traces and costs will be stored in memory only');
+  }
+
+  // Initialize Provider Manager with initial configuration
+  try {
+    console.log('🚀 Initializing Provider Manager...');
+    
+    // Load initial provider configurations
+    const initialProviders = [];
+    
+    // Add OpenAI provider if API key is available
+    if (OPENAI_API_KEY) {
+      initialProviders.push({
+        id: 'openai',
+        name: 'OpenAI',
+        type: 'openai',
+        endpoint: 'https://api.openai.com/v1',
+        apiKey: OPENAI_API_KEY,
+        status: 'active',
+        capabilities: ['chat', 'reasoning', 'analysis', 'function_calling', 'vision', 'long_context']
+      });
+    }
+    
+    // Add OpenAI OSS provider (via Ollama) - only if Ollama is available
+    try {
+      const ollamaCheck = await axios.get(`${OLLAMA_HOST}/api/tags`, { timeout: 5000 });
+      if (ollamaCheck.status === 200) {
+        initialProviders.push({
+          id: 'openai-oss',
+          name: 'OpenAI OSS (via Ollama)',
+          type: 'openai-oss',
+          endpoint: `${OLLAMA_HOST}/api`,
+          status: 'active',
+          capabilities: ['chat', 'reasoning', 'analysis', 'function_calling', 'chain_of_thought']
+        });
+      }
+    } catch (error) {
+      console.warn(`[Server] Ollama not available at ${OLLAMA_HOST}, skipping OpenAI OSS provider`);
+    }
+    
+    // Add Anthropic provider if API key is available
+    if (ANTHROPIC_API_KEY) {
+      initialProviders.push({
+        id: 'anthropic',
+        name: 'Anthropic Claude',
+        type: 'anthropic',
+        endpoint: 'https://api.anthropic.com/v1',
+        apiKey: ANTHROPIC_API_KEY,
+        status: 'active',
+        capabilities: ['chat', 'reasoning', 'analysis', 'function_calling', 'vision', 'extended_thinking', 'computer_use']
+      });
+    }
+    
+    // Add Google provider if API key is available
+    if (GOOGLE_API_KEY) {
+      initialProviders.push({
+        id: 'google',
+        name: 'Google Gemini',
+        type: 'google',
+        endpoint: 'https://generativelanguage.googleapis.com/v1beta',
+        apiKey: GOOGLE_API_KEY,
+        status: 'active',
+        capabilities: ['chat', 'reasoning', 'analysis', 'function_calling', 'vision', 'audio', 'video', 'thinking', 'code_execution']
+      });
+    }
+    
+    // Add Perplexity provider if API key is available
+    if (PERPLEXITY_API_KEY) {
+      initialProviders.push({
+        id: 'perplexity',
+        name: 'Perplexity AI',
+        type: 'perplexity',
+        endpoint: 'https://api.perplexity.ai',
+        apiKey: PERPLEXITY_API_KEY,
+        status: 'active',
+        capabilities: ['chat', 'web_search', 'real_time', 'citations', 'reasoning']
+      });
+    }
+    
+    // Add OpenAI OSS provider (Ollama) - always available for local inference
+    initialProviders.push({
+      id: 'openai-oss',
+      name: 'Ollama Open Source Models',
+      type: 'openai-oss',
+      endpoint: `${OLLAMA_HOST}/api`,
+      status: 'active',
+      capabilities: ['chat', 'reasoning', 'local_inference', 'cost_free', 'privacy_focused']
+    });
+    
+    // Apply initial configuration
+    await providerManager.applyConfiguration({ providers: initialProviders });
+    
+    console.log('✅ Provider Manager initialized with providers:', providerManager.getActiveProviders());
+  } catch (error) {
+    console.error('Provider Manager initialization failed:', error);
+    console.warn('Continuing without provider management...');
+  }
+  
+  // Initialize service mesh protocols
+  try {
+    serviceMesh = new ServiceMeshIntegration(internalApp, internalServer, authenticateInternal);
+    await serviceMesh.initialize();
+    console.log('✅ Service mesh protocols initialized');
+  } catch (error) {
+    console.error('Service mesh initialization failed:', error);
+    console.warn('Continuing without service mesh protocols...');
+  }
+
+  // Skip Enhanced Configuration Service - use in-memory configuration only
+  console.log('⚠️  Enhanced Configuration Service DISABLED - using in-memory provider configuration');
+  console.log('   Providers will maintain current active state without database override');
+
+  // Initialize AHIS Integration Service
+  try {
+    const ahisIntegration = new AHISIntegrationService({
+      gatewayPort: INTERNAL_PORT,
+      syncInterval: parseInt(process.env.AHIS_SYNC_INTERVAL) || 120000,
+      apiKey: API_KEY,
+      enabled: process.env.ENABLE_AHIS_INTEGRATION !== 'false'
+    });
+
+    await ahisIntegration.start();
+    console.log(`   AHIS Integration: ${ahisIntegration.ahisUrl}`);
+    console.log(`   Platform Sync: ${ahisIntegration.syncInterval}ms interval`);
+
+    // Listen to AHIS integration events
+    ahisIntegration.on('platform_sync_complete', (event) => {
+      console.log(`[AHIS] Platform sync complete: ${event.providersCount} providers, ${event.agentsCount} agents`);
+      
+      // Merge AHIS providers with dashboard configuration
+      if (dashboardConfig) {
+        mergeAHISProvidersWithDashboard();
+      }
+      
+      // Broadcast platform update via service mesh
+      if (serviceMesh) {
+        serviceMesh.broadcastEvent('platform_providers_updated', {
+          providersCount: event.providersCount,
+          agentsCount: event.agentsCount,
+          timestamp: event.timestamp
+        });
+      }
+    });
+
+    ahisIntegration.on('providers_updated', (event) => {
+      console.log(`[AHIS] Providers updated: ${event.count} platform providers discovered`);
+    });
+
+    ahisIntegration.on('agents_updated', (event) => {
+      console.log(`[AHIS] Agents updated: ${event.count} platform agents discovered`);
+    });
+
+    ahisIntegration.on('sync_error', (event) => {
+      console.error(`[AHIS] Platform sync error: ${event.error}`);
+    });
+
+  } catch (error) {
+    console.error('AHIS Integration Service initialization failed:', error);
+    console.warn('Continuing without AHIS platform discovery...');
+  }
+});
+
+// Start external server (AI inference)
+const externalServer = externalApp.listen(EXTERNAL_PORT, () => {
+  console.log(`🤖 AI Gateway v2.0 EXTERNAL (AI Inference) running on port ${EXTERNAL_PORT}`);
+  console.log(`   Health: http://localhost:${EXTERNAL_PORT}/health`);
+  console.log(`   Chat: http://localhost:${EXTERNAL_PORT}/api/v1/chat/completions`);
+  console.log(`   Models: http://localhost:${EXTERNAL_PORT}/api/v1/models`);
+  console.log(`   Perplexity: http://localhost:${EXTERNAL_PORT}/api/v1/perplexity/search`);
+  console.log(`   Proxying to: ${OLLAMA_HOST}`);
+});
+
+console.log('\n✅ AI Gateway v2.0 Dual-Port Architecture Ready');
+console.log(`   TripCraft → External Port ${EXTERNAL_PORT}`);
+console.log(`   Ecosystem Services → Internal Port ${INTERNAL_PORT}`);
+
+// Graceful shutdown for both servers
+const shutdown = async () => {
+  console.log('\n🛑 Shutting down AI Gateway v2.0 Dual-Port...');
+  
+  // Shutdown service mesh protocols first
+  if (serviceMesh) {
+    await serviceMesh.shutdown();
+  }
+  
+  internalServer.close(() => {
+    console.log('Internal server closed');
+  });
+  externalServer.close(() => {
+    console.log('External server closed');
+  });
+  process.exit(0);
+};
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

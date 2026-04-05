@@ -1,0 +1,75 @@
+# k3d Cluster Configuration for AI Gateway + AHIS Server
+# Version: v2.1.0
+# Created: 2025-09-09
+# Compliant with AIHDS Port Registry
+
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: ai-gateway-ecosystem
+servers: 1
+agents: 2
+
+# Port mappings for LoadBalancer services
+ports:
+  # AI Gateway Internal (Service Mesh) - Port 7777
+  - port: 7777:7777
+    nodeFilters:
+      - "loadbalancer"
+  
+  # AI Gateway External (Client API) - Port 8777  
+  - port: 8777:8777
+    nodeFilters:
+      - "loadbalancer"
+  
+  # AHIS Server - Port 8888
+  - port: 8888:8888
+    nodeFilters:
+      - "loadbalancer"
+  
+  # Kubernetes API Server (auto-assigned)
+  - port: 6550:6443
+    nodeFilters:
+      - "server:0"
+
+# Environment variables
+env:
+  - envVar: K3S_KUBECONFIG_OUTPUT=/tmp/k3d-ai-gateway-ecosystem-kubeconfig
+    nodeFilters:
+      - "server:*"
+  - envVar: K3S_KUBECONFIG_MODE=666
+    nodeFilters:
+      - "server:*"
+
+# Image for k3s nodes
+image: rancher/k3s:v1.31.5-k3s1
+
+# Network configuration
+network: ai-gateway-network
+
+# Registry configuration for local images
+registries:
+  create:
+    name: ai-gateway-registry
+    host: "0.0.0.0"
+    hostPort: "5001"
+    
+# Options for k3s server
+options:
+  k3d:
+    wait: true
+    timeout: "300s"
+    disableLoadbalancer: false
+  k3s:
+    extraArgs:
+      - arg: "--disable=traefik"
+        nodeFilters:
+          - "server:*"
+      - arg: "--tls-san=host.docker.internal"
+        nodeFilters:
+          - "server:*"
+
+# Cluster management commands:
+# Create: k3d cluster create --config k3d-cluster-config.yaml
+# Delete: k3d cluster delete ai-gateway-ecosystem
+# Status: k3d cluster list | grep ai-gateway-ecosystem

@@ -1,0 +1,98 @@
+# AWS RDS PostgreSQL Deployment Template
+# For staging and production environments
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-rds-config
+  namespace: ai-gateway
+data:
+  DATABASE_PROVIDER: "postgresql"
+  DATABASE_PORT: "5432"
+  DATABASE_SSL_MODE: "require"
+  DATABASE_POOL_MIN: "10"
+  DATABASE_POOL_MAX: "30"
+  DATABASE_CONNECTION_TIMEOUT: "10000"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-rds-credentials
+  namespace: ai-gateway
+type: Opaque
+stringData:
+  DATABASE_URL: "postgresql://username:password@prod-db.cluster-xyz.us-west-2.rds.amazonaws.com:5432/ai_gateway_prod"
+  DATABASE_READ_REPLICA_URL: "postgresql://username:password@prod-db-ro.cluster-xyz.us-west-2.rds.amazonaws.com:5432/ai_gateway_prod"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-gateway-aws-rds
+  namespace: ai-gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ai-gateway
+      database: aws-rds
+  template:
+    metadata:
+      labels:
+        app: ai-gateway
+        database: aws-rds
+    spec:
+      containers:
+      - name: ai-gateway
+        image: ai-gateway-v2:latest
+        ports:
+        - containerPort: 7777
+        - containerPort: 8777
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: DATABASE_PROVIDER
+          valueFrom:
+            configMapKeyRef:
+              name: aws-rds-config
+              key: DATABASE_PROVIDER
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: aws-rds-credentials
+              key: DATABASE_URL
+        - name: DATABASE_READ_REPLICA_URL
+          valueFrom:
+            secretKeyRef:
+              name: aws-rds-credentials
+              key: DATABASE_READ_REPLICA_URL
+        - name: DATABASE_SSL_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: aws-rds-config
+              key: DATABASE_SSL_MODE
+        - name: DATABASE_POOL_MAX
+          valueFrom:
+            configMapKeyRef:
+              name: aws-rds-config
+              key: DATABASE_POOL_MAX
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 7777
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 7777
+          initialDelaySeconds: 5
+          periodSeconds: 5

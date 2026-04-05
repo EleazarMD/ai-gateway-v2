@@ -1,0 +1,81 @@
+
+      syntax = "proto3";
+      
+      package ai_gateway;
+      
+      service ServiceMesh {
+        rpc GetHealth(HealthRequest) returns (HealthResponse);
+        rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+        rpc RegisterService(ServiceRegistration) returns (ServiceResponse);
+        rpc DiscoverServices(ServiceQuery) returns (ServicesResponse);
+        rpc StreamMetrics(MetricsRequest) returns (stream MetricsResponse);
+      }
+      
+      message HealthRequest {
+        string service_id = 1;
+      }
+      
+      message HealthResponse {
+        string status = 1;
+        double uptime = 2;
+        MemoryUsage memory = 3;
+        string timestamp = 4;
+      }
+      
+      message MemoryUsage {
+        double rss = 1;
+        double heap_total = 2;
+        double heap_used = 3;
+        double external = 4;
+      }
+      
+      message MetricsRequest {
+        string service_id = 1;
+        repeated string metric_types = 2;
+      }
+      
+      message MetricsResponse {
+        string service_id = 1;
+        double uptime = 2;
+        MemoryUsage memory = 3;
+        map<string, double> custom_metrics = 4;
+        string timestamp = 5;
+      }
+      
+      message ServiceRegistration {
+        string id = 1;
+        string name = 2;
+        string version = 3;
+        int32 port = 4;
+        repeated string capabilities = 5;
+        map<string, string> metadata = 6;
+      }
+      
+      message ServiceResponse {
+        bool success = 1;
+        string message = 2;
+        string service_id = 3;
+      }
+      
+      message ServiceQuery {
+        string capability = 1;
+        string name_pattern = 2;
+        string version = 3;
+      }
+      
+      message ServicesResponse {
+        repeated ServiceInfo services = 1;
+      }
+      
+      message ServiceInfo {
+        string id = 1;
+        string name = 2;
+        string version = 3;
+        string status = 4;
+        int32 port = 5;
+        repeated string capabilities = 6;
+        map<string, string> metadata = 7;
+        string registered_at = 8;
+        string last_seen = 9;
+      }
+    

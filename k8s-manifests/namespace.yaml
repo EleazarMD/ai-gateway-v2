@@ -1,0 +1,18 @@
+# AI Homelab Unified Namespace
+# Version: v2.1.0
+# Created: 2025-09-09
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-homelab-unified
+  labels:
+    name: ai-homelab-unified
+    ecosystem: ai-homelab
+    version: "2.1.0"
+    created-by: cascade-ai
+    compliance: port-registry-enforced
+  annotations:
+    description: "Unified namespace for AI Gateway and AHIS Server ecosystem"
+    port-registry-compliant: "true"
+    database-connection: "unified-homelab-database"

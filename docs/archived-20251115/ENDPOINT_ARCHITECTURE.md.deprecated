@@ -1,0 +1,526 @@
+# AI Gateway v2.0 - Endpoint Architecture
+
+**Version**: 2.0  
+**Last Updated**: November 2, 2025  
+**Status**: 🟢 ACTIVE STANDARD
+
+---
+
+## Table of Contents
+
+1. [Architectural Principle](#architectural-principle)
+2. [Endpoint Categories](#endpoint-categories)
+3. [Model-Based Routing](#model-based-routing)
+4. [Config-Based Routing](#config-based-routing)
+5. [Implementation Guide](#implementation-guide)
+6. [Migration Strategy](#migration-strategy)
+7. [Examples](#examples)
+
+---
+
+## Architectural Principle
+
+### "One Endpoint Per Capability, Not Per Provider"
+
+**Core Rule**: Create generic endpoints that route based on parameters (model name, provider name), not separate endpoints for each provider.
+
+### Why This Pattern?
+
+✅ **Scalability**: Add 100+ providers without code changes  
+✅ **Consistency**: Single point for auth, rate limiting, logging  
+✅ **Maintainability**: One endpoint to debug and monitor  
+✅ **Industry Standard**: Follows OpenAI's API design  
+✅ **Future-Proof**: Easy to add caching, metrics, circuit breakers
+
+---
+
+## Endpoint Categories
+
+### Category 1: LLM Capabilities (Model-Based Routing)
+
+**Use Case**: Different AI models from different providers
+
+**Pattern**: `/api/v1/{capability}/{action}`
+
+**Routing Logic**: Model parameter → Provider detection → API routing
+
+| Endpoint | Purpose | Models Supported |
+|----------|---------|------------------|
+| `/api/v1/chat/completions` | Text generation | gpt-4, claude-4-sonnet, gemini-2.0, o1-preview, llama-3 |
+| `/api/v1/images/generate` | Image generation | dall-e-3, imagen-3, sdxl-1.0 |
+| `/api/v1/embeddings/generate` | Text embeddings | text-embedding-3-large, textembedding-gecko |
+| `/api/v1/audio/transcribe` | Speech-to-text | whisper-1, chirp-3 |
+| `/api/v1/audio/speech` | Text-to-speech | tts-1, tts-1-hd |
+
+### Category 2: External Tools (Config-Based Routing)
+
+**Use Case**: External APIs/MCPs with different actions
+
+**Pattern**: `/api/v1/mcp/:provider/:action`
+
+**Routing Logic**: Provider config → Action config → API routing
+
+| Provider | Actions | Base URL |
+|----------|---------|----------|
+| tavily | search, extract | https://api.tavily.com |
+| serper | search | https://google.serper.dev |
+| browserless | screenshot, pdf | https://chrome.browserless.io |
+| firecrawl | scrape, crawl | https://api.firecrawl.dev |
+
+---
+
+## Model-Based Routing
+
+### How It Works
+
+```javascript
+// 1. Client sends request with model parameter
+POST /api/v1/chat/completions
+{
+  "model": "claude-4-sonnet",
+  "messages": [...]
+}
+
+// 2. Gateway detects provider from model name
+function detectProvider(model) {
+  if (model.startsWith('gpt-') || model.startsWith('o1-')) return 'openai';
+  if (model.startsWith('claude-')) return 'anthropic';
+  if (model.startsWith('gemini-')) return 'google';
+  if (model.startsWith('llama')) return 'ollama';
+  return null;
+}
+
+// 3. Gateway fetches API key for detected provider
+const apiKey = await fetchKey(provider, serviceId, projectId);
+
+// 4. Gateway routes to provider's API
+const response = await routeToProvider(provider, model, request, apiKey);
+
+// 5. Gateway returns unified response
+res.json(response);
+```
+
+### Provider Detection Rules
+
+```javascript
+// OpenAI
+'gpt-4', 'gpt-4-turbo', 'gpt-4o', 'gpt-3.5-turbo'
+'o1-preview', 'o1-mini'  // Deep research models
+'dall-e-2', 'dall-e-3'    // Image generation
+'whisper-1', 'tts-1'      // Audio models
+
+// Anthropic
+'claude-4-sonnet', 'claude-3-5-sonnet', 'claude-3-haiku'
+
+// Google
+'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'
+'imagen-3', 'textembedding-gecko'
+
+// Stability AI
+'sdxl-1.0', 'sd-3.5-large', 'sd-ultra'
+
+// Ollama (Local)
+'llama3', 'mistral', 'mixtral', 'codellama'
+```
+
+### Implementation Template
+
+```javascript
+externalApp.post('/api/v1/{capability}/{action}', authenticateExternal, async (req, res) => {
+  try {
+    const { model, ...params } = req.body;
+    const serviceId = req.headers['x-service-id'] || 'default';
+    const projectId = req.headers['x-project-id'] || 'default';
+    
+    // 1. Detect provider from model
+    const provider = detectProvider(model);
+    if (!provider) {
+      return res.status(400).json({ error: `Unsupported model: ${model}` });
+    }
+    
+    // 2. Fetch API key from AI Inferencing service
+    const apiKey = await fetchProviderKey(provider, projectId, serviceId);
+    
+    // 3. Route to provider-specific handler
+    const response = await routeToProvider(provider, model, params, apiKey);
+    
+    // 4. Return response
+    res.json(response);
+  } catch (error) {
+    console.error(`[{Capability}] Error:`, error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+```
+
+---
+
+## Config-Based Routing
+
+### How It Works
+
+```javascript
+// 1. Configuration file defines providers
+// mcp-providers-config.json
+{
+  "tavily": {
+    "baseUrl": "https://api.tavily.com",
+    "actions": {
+      "search": {
+        "path": "/search",
+        "method": "POST",
+        "auth": "bearer"
+      },
+      "extract": {
+        "path": "/extract",
+        "method": "POST",
+        "auth": "bearer"
+      }
+    },
+    "keyProvider": "tavily"
+  },
+  "serper": {
+    "baseUrl": "https://google.serper.dev",
+    "actions": {
+      "search": {
+        "path": "/search",
+        "method": "POST",
+        "auth": "api-key"
+      }
+    },
+    "keyProvider": "serper"
+  }
+}
+
+// 2. Generic proxy handles all providers
+externalApp.all('/api/v1/mcp/:provider/:action', authenticateExternal, async (req, res) => {
+  const { provider, action } = req.params;
+  
+  // Load provider config
+  const providerConfig = mcpProvidersConfig[provider];
+  const actionConfig = providerConfig.actions[action];
+  
+  // Fetch API key
+  const apiKey = await fetchProviderKey(providerConfig.keyProvider);
+  
+  // Build request
+  const targetUrl = `${providerConfig.baseUrl}${actionConfig.path}`;
+  const authHeaders = buildAuthHeaders(actionConfig.auth, apiKey);
+  
+  // Proxy request
+  const response = await axios({
+    method: actionConfig.method,
+    url: targetUrl,
+    data: req.body,
+    headers: authHeaders
+  });
+  
+  res.json(response.data);
+});
+```
+
+### Configuration Schema
+
+```json
+{
+  "provider_name": {
+    "baseUrl": "string",           // Provider's API base URL
+    "actions": {
+      "action_name": {
+        "path": "string",          // Endpoint path
+        "method": "GET|POST|PUT",  // HTTP method
+        "auth": "bearer|api-key|query-token"  // Auth mechanism
+      }
+    },
+    "keyProvider": "string"        // Which key to fetch from AI Inferencing
+  }
+}
+```
+
+### Auth Mechanisms
+
+```javascript
+function buildAuthHeaders(authType, apiKey) {
+  switch (authType) {
+    case 'bearer':
+      return { 'Authorization': `Bearer ${apiKey}` };
+      
+    case 'api-key':
+      return { 'X-API-Key': apiKey };
+      
+    case 'api-key-header':
+      return { 'api-key': apiKey };
+      
+    case 'query-token':
+      // Token goes in query string (handled separately)
+      return {};
+      
+    default:
+      return {};
+  }
+}
+```
+
+---
+
+## Implementation Guide
+
+### Step 1: Add New LLM Capability
+
+**Example: Text Embeddings**
+
+```javascript
+// 1. Create generic endpoint
+externalApp.post('/api/v1/embeddings/generate', authenticateExternal, async (req, res) => {
+  const { model, input } = req.body;
+  const provider = detectEmbeddingProvider(model);
+  const apiKey = await fetchProviderKey(provider);
+  const response = await routeEmbedding(provider, model, input, apiKey);
+  res.json(response);
+});
+
+// 2. Add provider detection
+function detectEmbeddingProvider(model) {
+  if (model.includes('embedding-3')) return 'openai';
+  if (model.includes('textembedding-gecko')) return 'google';
+  if (model.includes('embed-v3')) return 'cohere';
+  return null;
+}
+
+// 3. Implement provider-specific routing
+async function routeEmbedding(provider, model, input, apiKey) {
+  switch (provider) {
+    case 'openai':
+      return await axios.post('https://api.openai.com/v1/embeddings', 
+        { model, input },
+        { headers: { 'Authorization': `Bearer ${apiKey}` }}
+      );
+    // ... other providers
+  }
+}
+```
+
+### Step 2: Add New MCP Provider
+
+**Example: Firecrawl Web Scraping**
+
+```json
+// 1. Add to mcp-providers-config.json
+{
+  "firecrawl": {
+    "baseUrl": "https://api.firecrawl.dev/v1",
+    "actions": {
+      "scrape": {
+        "path": "/scrape",
+        "method": "POST",
+        "auth": "bearer"
+      },
+      "crawl": {
+        "path": "/crawl",
+        "method": "POST",
+        "auth": "bearer"
+      }
+    },
+    "keyProvider": "firecrawl"
+  }
+}
+
+// 2. Use generic MCP proxy (no code changes needed!)
+POST /api/v1/mcp/firecrawl/scrape
+{
+  "url": "https://example.com"
+}
+```
+
+---
+
+## Migration Strategy
+
+### Phase 1: Create Generic Endpoints (Completed)
+- ✅ `/api/v1/chat/completions` - Already exists
+- ✅ `/api/v1/mcp/:provider/:action` - Implemented
+
+### Phase 2: Add Missing Generic Endpoints (In Progress)
+- ⏳ `/api/v1/images/generate` - To be implemented
+- ⏳ MCP Provider Config - To be created
+
+### Phase 3: Migrate Existing Endpoints (Planned)
+- `/api/v1/tavily/search` → `/api/v1/mcp/tavily/search`
+- `/api/v1/perplexity/search` → Keep as-is (unique integration)
+
+### Phase 4: Deprecate Old Endpoints (Future)
+- Mark old endpoints as `@deprecated`
+- Keep for 6 months for backward compatibility
+- Add deprecation warnings to responses
+- Remove after grace period
+
+---
+
+## Examples
+
+### Example 1: Chat Completions (Multiple Providers)
+
+```bash
+# OpenAI GPT-4
+curl -X POST http://localhost:8777/api/v1/chat/completions \
+  -H "X-Service-ID: my-app" \
+  -H "X-Project-ID: my-project" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+
+# Anthropic Claude
+curl -X POST http://localhost:8777/api/v1/chat/completions \
+  -H "X-Service-ID: my-app" \
+  -H "X-Project-ID: my-project" \
+  -d '{
+    "model": "claude-4-sonnet",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+
+# OpenAI o1 (Deep Research)
+curl -X POST http://localhost:8777/api/v1/chat/completions \
+  -H "X-Service-ID: my-app" \
+  -H "X-Project-ID: my-project" \
+  -d '{
+    "model": "o1-preview",
+    "messages": [{"role": "user", "content": "Explain quantum computing"}]
+  }'
+```
+
+### Example 2: Image Generation (Multiple Providers)
+
+```bash
+# OpenAI DALL-E 3
+curl -X POST http://localhost:8777/api/v1/images/generate \
+  -H "X-Service-ID: my-app" \
+  -d '{
+    "model": "dall-e-3",
+    "prompt": "A sunset over mountains",
+    "size": "1024x1024"
+  }'
+
+# Google Imagen 3
+curl -X POST http://localhost:8777/api/v1/images/generate \
+  -H "X-Service-ID: my-app" \
+  -d '{
+    "model": "imagen-3",
+    "prompt": "A sunset over mountains"
+  }'
+```
+
+### Example 3: MCP Web Search (Config-Based)
+
+```bash
+# Tavily Search
+curl -X POST http://localhost:8777/api/v1/mcp/tavily/search \
+  -H "X-Service-ID: goose-agent" \
+  -H "X-Project-ID: ai-workspace" \
+  -d '{
+    "query": "latest AI developments",
+    "max_results": 5
+  }'
+
+# Serper Google Search
+curl -X POST http://localhost:8777/api/v1/mcp/serper/search \
+  -H "X-Service-ID: goose-agent" \
+  -d '{
+    "q": "latest AI developments"
+  }'
+```
+
+---
+
+## Best Practices
+
+### DO ✅
+
+1. **Create generic endpoints** for new capabilities
+2. **Use model parameter** for provider routing (LLM capabilities)
+3. **Use config files** for external tool routing (MCP)
+4. **Fetch API keys** from AI Inferencing service
+5. **Return unified** response formats
+6. **Log all requests** with provider/model info
+7. **Add rate limiting** per provider at the gateway level
+8. **Implement caching** for expensive operations
+
+### DON'T ❌
+
+1. **Create provider-specific endpoints** (e.g., `/api/v1/openai/chat`)
+2. **Hardcode API keys** in gateway code
+3. **Hardcode provider URLs** (use config)
+4. **Skip provider detection** logic
+5. **Return provider-specific** error formats (normalize them)
+6. **Bypass the gateway** for direct provider calls
+
+---
+
+## Monitoring & Observability
+
+### Metrics to Track
+
+```javascript
+// Per endpoint
+- request_count{endpoint, provider, model}
+- request_duration{endpoint, provider, model}
+- error_rate{endpoint, provider, error_type}
+- cost_per_request{provider, model}
+
+// Gateway-wide
+- active_providers_count
+- total_api_calls
+- cache_hit_rate{provider}
+- rate_limit_hits{provider}
+```
+
+### Logging Format
+
+```json
+{
+  "timestamp": "2025-11-02T11:52:00Z",
+  "endpoint": "/api/v1/chat/completions",
+  "model": "claude-4-sonnet",
+  "provider": "anthropic",
+  "service_id": "my-app",
+  "project_id": "my-project",
+  "duration_ms": 1234,
+  "tokens": {"input": 100, "output": 200},
+  "cost": 0.0015,
+  "status": "success"
+}
+```
+
+---
+
+## Future Enhancements
+
+### Phase 1 (Current)
+- ✅ Generic chat completions endpoint
+- ⏳ Generic MCP proxy endpoint
+- ⏳ MCP provider configuration system
+
+### Phase 2 (Next)
+- ⏳ Generic image generation endpoint
+- ⏳ Response caching layer
+- ⏳ Request batching for embeddings
+
+### Phase 3 (Future)
+- Generic embeddings endpoint
+- Generic audio/transcription endpoint
+- Generic video processing endpoint
+- Advanced routing (fallback chains, A/B testing)
+- Cost optimization (provider selection based on cost)
+
+---
+
+## References
+
+- [OpenAI API Design](https://platform.openai.com/docs/api-reference)
+- [AI Gateway Global Rules](../GLOBAL_RULES_V3.md#-ai-gateway-endpoint-architecture-level-1)
+- [Service Discovery Standard](../AIHDS_SERVICE_DISCOVERY_STANDARD.md)
+- [MCP Provider Config Schema](./config/mcp-providers-schema.json)
+
+---
+
+**Questions or Issues?** Contact the AI Infrastructure team or file an issue in the AI Homelab repository.

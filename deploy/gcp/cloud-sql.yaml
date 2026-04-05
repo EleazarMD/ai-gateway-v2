@@ -1,0 +1,89 @@
+# Google Cloud SQL PostgreSQL Deployment Template
+# For staging and production environments
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gcp-cloudsql-config
+  namespace: ai-gateway
+data:
+  DATABASE_PROVIDER: "postgresql"
+  DATABASE_PORT: "5432"
+  DATABASE_SSL_MODE: "require"
+  DATABASE_POOL_MIN: "10"
+  DATABASE_POOL_MAX: "30"
+  DATABASE_CONNECTION_TIMEOUT: "10000"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gcp-cloudsql-credentials
+  namespace: ai-gateway
+type: Opaque
+stringData:
+  DATABASE_URL: "postgresql://username:password@10.x.x.x:5432/ai_gateway_prod"
+  DATABASE_READ_REPLICA_URL: "postgresql://username:password@10.x.x.y:5432/ai_gateway_prod"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-gateway-gcp-cloudsql
+  namespace: ai-gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ai-gateway
+      database: gcp-cloudsql
+  template:
+    metadata:
+      labels:
+        app: ai-gateway
+        database: gcp-cloudsql
+    spec:
+      containers:
+      - name: cloud-sql-proxy
+        image: gcr.io/cloudsql-docker/gce-proxy:1.33.2
+        command:
+          - "/cloud_sql_proxy"
+          - "-instances=PROJECT_ID:REGION:INSTANCE_NAME=tcp:5432"
+        securityContext:
+          runAsNonRoot: true
+      - name: ai-gateway
+        image: ai-gateway-v2:latest
+        ports:
+        - containerPort: 7777
+        - containerPort: 8777
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: DATABASE_HOST
+          value: "127.0.0.1"
+        - name: DATABASE_PORT
+          value: "5432"
+        - name: DATABASE_NAME
+          value: "ai_gateway_prod"
+        - name: DATABASE_USER
+          valueFrom:
+            secretKeyRef:
+              name: gcp-cloudsql-credentials
+              key: DATABASE_USER
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: gcp-cloudsql-credentials
+              key: DATABASE_PASSWORD
+        - name: DATABASE_SSL_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: gcp-cloudsql-config
+              key: DATABASE_SSL_MODE
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"

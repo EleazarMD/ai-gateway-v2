@@ -1,0 +1,314 @@
+# AI Gateway MCP Proxy Architecture
+
+## Overview
+Generic, configuration-driven proxy for all MCP (Model Context Protocol) server external calls. Follows proper service-oriented architecture with no direct database access.
+
+## Architecture Principles
+
+### ✅ Correct Pattern: Service-to-Service Communication
+```
+Goose/Client → AI Gateway → AI Inferencing Service API → Database
+                   ↓
+              Tavily/Provider API
+```
+
+### ❌ Incorrect Pattern: Direct Database Access
+```
+AI Gateway → Database (FORBIDDEN)
+```
+
+## Components
+
+### 1. AI Gateway MCP Proxy
+**File**: `/Users/eleazar/Projects/AIHomelab/core/ai-gateway-v2/server.js`
+
+**Endpoint**: `/api/v1/mcp/:provider/:action`
+
+**Responsibilities**:
+- Receive MCP requests from clients (Goose, custom wrappers)
+- Load provider configuration from `mcp-providers-config.json`
+- Fetch decrypted API keys from AI Inferencing service via API
+- Proxy requests to external provider APIs (Tavily, Serper, etc.)
+- Return responses to clients
+
+**Key Function**:
+```javascript
+async function getProviderKey(serviceId, provider) {
+  const AI_INFERENCING_URL = process.env.AI_INFERENCING_URL || 'http://localhost:9000';
+  
+  const response = await axios.get(
+    `${AI_INFERENCING_URL}/api/v1/admin/keys/services/${serviceId}/keys/${provider}/decrypted`,
+    { headers: { 'X-Admin-Key': 'ai-inferencing-admin-key-2024' } }
+  );
+  
+  return response.data.key;
+}
+```
+
+### 2. AI Inferencing Service
+**File**: `/Users/eleazar/Projects/AIHomelab/services/ai-inferencing/src/routes/multi-tenant-api-key-routes.js`
+
+**New Endpoint**: `/api/v1/admin/keys/services/:serviceId/keys/:provider/decrypted`
+
+**Responsibilities**:
+- Manage encrypted API keys in database
+- Decrypt keys on-demand for authorized services
+- Enforce service isolation (multi-tenancy)
+- Never expose encryption keys or methods to other services
+
+**Key Method**:
+```javascript
+async getDecryptedKey(req, res) {
+  const { serviceId, provider } = req.params;
+  
+  // Uses keyManager.getKey() which handles decryption internally
+  const decryptedKey = await this.keyManager.getKey(serviceId, provider);
+  
+  res.json({ 
+    success: true,
+    serviceId,
+    provider,
+    key: decryptedKey  // Only sent to authorized services
+  });
+}
+```
+
+### 3. MCP Providers Configuration
+**File**: `/Users/eleazar/Projects/AIHomelab/core/ai-gateway-v2/config/mcp-providers-config.json`
+
+**Purpose**: Define routing rules for MCP providers
+
+**Example**:
+```json
+{
+  "tavily": {
+    "baseUrl": "https://api.tavily.com",
+    "actions": {
+      "search": {
+        "path": "/search",
+        "method": "POST",
+        "auth": "bearer"
+      }
+    },
+    "keyProvider": "tavily"
+  }
+}
+```
+
+## Request Flow
+
+```
+1. Client (Goose/MCP Wrapper)
+   ├─ POST /api/v1/mcp/tavily/search
+   ├─ Headers: X-API-Key, X-Service-ID, X-Project-ID
+   └─ Body: { query: "...", max_results: 2 }
+        │
+        ▼
+2. AI Gateway MCP Proxy
+   ├─ Validates provider exists in config
+   ├─ Validates action exists for provider
+   ├─ Constructs serviceId: {project_id}-{provider}-service
+   │   Example: "ai-workspace-tavily-service"
+   └─ Calls AI Inferencing API
+        │
+        ▼
+3. AI Inferencing Service API
+   ├─ GET /api/v1/admin/keys/services/ai-workspace-tavily-service/keys/tavily/decrypted
+   ├─ Authenticates: X-Admin-Key header
+   ├─ Queries database for encrypted key
+   ├─ Decrypts key using internal encryption service
+   └─ Returns: { success: true, key: "tvly-xxx..." }
+        │
+        ▼
+4. AI Gateway (continued)
+   ├─ Receives decrypted key
+   ├─ Builds auth headers based on provider config
+   │   bearer: Authorization: Bearer {key}
+   │   api-key: X-API-Key: {key}
+   │   query-token: appends ?api_key={key} to URL
+   ├─ Proxies to provider API
+   └─ POST https://api.tavily.com/search
+        │
+        ▼
+5. External Provider (Tavily)
+   ├─ Receives search request with valid API key
+   ├─ Processes search
+   └─ Returns results
+        │
+        ▼
+6. AI Gateway → Client
+   └─ Returns provider response to client
+```
+
+## Service ID Convention
+
+**Format**: `{project_id}-{provider}-service`
+
+**Examples**:
+- `ai-workspace-tavily-service`
+- `ai-workspace-serper-service`
+- `tripcraft-browserless-service`
+
+**Why**: Enables multi-tenant key management where different projects/services can use different API keys for the same provider.
+
+## Authentication Schemes
+
+The MCP proxy supports three authentication patterns:
+
+### 1. Bearer Token (Most Common)
+```json
+{
+  "auth": "bearer"
+}
+```
+Results in: `Authorization: Bearer {api_key}`
+
+### 2. API Key Header
+```json
+{
+  "auth": "api-key"
+}
+```
+Results in: `X-API-Key: {api_key}`
+
+### 3. Query Token
+```json
+{
+  "auth": "query-token"
+}
+```
+Results in: URL appended with `?api_key={api_key}`
+
+## Adding New MCP Providers
+
+### Step 1: Add to Configuration
+Edit `mcp-providers-config.json`:
+```json
+{
+  "newprovider": {
+    "baseUrl": "https://api.newprovider.com",
+    "actions": {
+      "action1": {
+        "path": "/endpoint1",
+        "method": "POST",
+        "auth": "bearer"
+      }
+    },
+    "keyProvider": "newprovider"
+  }
+}
+```
+
+### Step 2: Add API Key to AI Inferencing
+Use AI Inferencing dashboard or API:
+```bash
+POST http://localhost:9000/api/v1/admin/keys/services/{serviceId}/keys
+{
+  "provider": "newprovider",
+  "apiKey": "key-xxx...",
+  "isPrimary": true
+}
+```
+
+### Step 3: Test
+```bash
+curl -X POST http://localhost:8777/api/v1/mcp/newprovider/action1 \
+  -H "X-API-Key: ai-gateway-api-key-2024" \
+  -H "X-Service-ID: goose-agent" \
+  -H "X-Project-ID: ai-workspace" \
+  -d '{"param": "value"}'
+```
+
+**No code changes required!**
+
+## Security Considerations
+
+### ✅ Proper Separation of Concerns
+- **AI Gateway**: No encryption keys, no database access
+- **AI Inferencing**: Owns encryption, manages database
+- **Communication**: Authenticated API calls only
+
+### ✅ Service Authentication
+- AI Gateway authenticates to AI Inferencing with admin key
+- Clients authenticate to AI Gateway with API key
+- Each layer validates authorization
+
+### ✅ Key Isolation
+- Keys are project/service specific
+- No global key sharing
+- Each service gets only its own keys
+
+## Error Handling
+
+### Key Not Found
+```json
+{
+  "error": "API key not available",
+  "message": "Could not retrieve API key for provider 'tavily' from AI Inferencing service",
+  "keyProvider": "tavily",
+  "serviceId": "ai-workspace-tavily-service"
+}
+```
+
+### Provider Not Found
+```json
+{
+  "error": "Provider not found",
+  "message": "MCP provider 'unknown' is not configured",
+  "available_providers": ["tavily", "serper", "browserless", "firecrawl"]
+}
+```
+
+### Action Not Found
+```json
+{
+  "error": "Action not found",
+  "message": "Action 'invalid' not found for provider 'tavily'",
+  "availableActions": ["search", "extract", "answer"]
+}
+```
+
+## Monitoring & Logging
+
+### AI Gateway Logs
+```
+[MCP Proxy] Request: tavily/search from goose-agent/ai-workspace
+[MCP Proxy] Fetching key for: ai-workspace-tavily-service/tavily
+[MCP Proxy] Proxying to: https://api.tavily.com/search
+```
+
+### AI Inferencing Logs
+```
+[Multi-Tenant API Routes] Getting decrypted key for ai-workspace-tavily-service/tavily
+[Multi-Tenant API Key Manager] Cache hit for ai-workspace-tavily-service:tavily
+```
+
+## Configuration Files
+
+### AI Gateway
+- `server.js` - MCP proxy endpoint implementation
+- `config/mcp-providers-config.json` - Provider routing rules
+
+### AI Inferencing
+- `src/routes/multi-tenant-api-key-routes.js` - Decrypted key API
+- `src/services/multi-tenant-api-key-manager.js` - Key management & decryption
+
+### Goose/Clients
+- `mcp-servers/goose-config/mcp-servers.json` - MCP server definitions
+- `mcp-servers/tavily-mcp-wrapper/index.js` - Custom wrapper for AI Gateway routing
+
+## Current Status
+
+✅ **Architecture**: Proper service-to-service communication implemented  
+✅ **AI Gateway**: Generic MCP proxy functional  
+✅ **AI Inferencing**: Decryption API endpoint added  
+✅ **Configuration**: mcp-providers-config.json with 4 providers  
+⏳ **Testing**: Requires valid Tavily API key for end-to-end test  
+
+## Next Steps
+
+1. Add valid Tavily API key to AI Inferencing service
+2. Test complete flow with actual search
+3. Add remaining MCP providers (Serper, Browserless, Firecrawl)
+4. Implement cost tracking for MCP tool usage
+5. Add rate limiting per provider

@@ -1,0 +1,327 @@
+const { EventEmitter } = require('events');
+
+/**
+ * Cost Tracking Service for AI Gateway v2.1
+ * Tracks token usage, costs, and budget management across providers
+ * Features: Real-time cost calculation, budget alerts, cost analytics
+ */
+class CostTrackingService extends EventEmitter {
+  constructor(storage) {
+    super();
+    this.storage = storage;
+    
+    // Provider pricing (per 1M tokens)
+    this.pricing = {
+      'openai': {
+        'gpt-4o': { prompt: 2.50, completion: 10.00 },
+        'gpt-4o-mini': { prompt: 0.150, completion: 0.600 },
+        'gpt-4-turbo': { prompt: 10.00, completion: 30.00 },
+        'gpt-4': { prompt: 30.00, completion: 60.00 },
+        'gpt-3.5-turbo': { prompt: 0.50, completion: 1.50 },
+        'o1-preview': { prompt: 15.00, completion: 60.00 },
+        'o1-mini': { prompt: 3.00, completion: 12.00 },
+      },
+      'anthropic': {
+        'claude-3-5-sonnet-20241022': { prompt: 3.00, completion: 15.00 },
+        'claude-3-5-haiku-20241022': { prompt: 0.80, completion: 4.00 },
+        'claude-3-opus-20240229': { prompt: 15.00, completion: 75.00 },
+        'claude-3-sonnet-20240229': { prompt: 3.00, completion: 15.00 },
+        'claude-3-haiku-20240307': { prompt: 0.25, completion: 1.25 },
+      },
+      'google': {
+        'gemini-2.0-flash-exp': { prompt: 0.00, completion: 0.00 },
+        'gemini-1.5-pro': { prompt: 1.25, completion: 5.00 },
+        'gemini-1.5-flash': { prompt: 0.075, completion: 0.30 },
+      },
+      'openai-oss': {
+        // Ollama models are free (local)
+        'default': { prompt: 0.00, completion: 0.00 },
+      },
+    };
+    
+    // Budget configuration
+    this.budgets = new Map();
+    this.alerts = new Map();
+    
+    console.log('[Cost Tracking] Service initialized');
+  }
+
+  /**
+   * Calculate cost for a request
+   */
+  calculateCost(provider, model, tokenUsage) {
+    const { prompt_tokens = 0, completion_tokens = 0, total_tokens = 0 } = tokenUsage;
+    
+    // Get provider pricing
+    const providerPricing = this.pricing[provider];
+    if (!providerPricing) {
+      console.warn(`[Cost Tracking] No pricing data for provider: ${provider}`);
+      return { prompt: 0, completion: 0, total: 0 };
+    }
+    
+    // Get model pricing
+    let modelPricing = providerPricing[model];
+    if (!modelPricing) {
+      // Try default pricing for provider
+      modelPricing = providerPricing['default'] || { prompt: 0, completion: 0 };
+      console.warn(`[Cost Tracking] No pricing for model ${model}, using default`);
+    }
+    
+    // Calculate costs (pricing is per 1M tokens, convert to per token)
+    const promptCost = (prompt_tokens / 1000000) * modelPricing.prompt;
+    const completionCost = (completion_tokens / 1000000) * modelPricing.completion;
+    const totalCost = promptCost + completionCost;
+    
+    return {
+      prompt: promptCost,
+      completion: completionCost,
+      total: totalCost,
+      currency: 'USD',
+    };
+  }
+
+  /**
+   * Record cost for a request
+   */
+  async recordCost(traceId, provider, model, tokenUsage, metadata = {}) {
+    const cost = this.calculateCost(provider, model, tokenUsage);
+    
+    const costRecord = {
+      traceId,
+      timestamp: new Date().toISOString(),
+      provider,
+      model,
+      tokens: tokenUsage,
+      cost,
+      client: metadata.clientId || 'unknown',
+      tags: metadata.tags || [],
+    };
+    
+    try {
+      await this.storage.saveCostRecord(costRecord);
+      this.emit('cost_recorded', costRecord);
+      
+      // Check budget alerts
+      await this.checkBudgetAlerts(provider, cost.total, metadata.clientId);
+      
+      return cost;
+    } catch (error) {
+      console.error('[Cost Tracking] Record error:', error);
+      return cost;
+    }
+  }
+
+  /**
+   * Get cost analytics
+   */
+  async getAnalytics(filters = {}) {
+    const {
+      timeRange = '24h',
+      groupBy = 'provider',
+      clientId = null,
+      provider = null,
+      model = null,
+    } = filters;
+    
+    try {
+      const analytics = await this.storage.getCostAnalytics({
+        timeRange,
+        groupBy,
+        clientId,
+        provider,
+        model,
+      });
+      
+      return analytics;
+    } catch (error) {
+      console.error('[Cost Tracking] Analytics error:', error);
+      return this.getDefaultAnalytics();
+    }
+  }
+
+  /**
+   * Get cost summary for time period
+   */
+  async getCostSummary(timeRange = '24h') {
+    try {
+      const summary = await this.storage.getCostSummary(timeRange);
+      return summary;
+    } catch (error) {
+      console.error('[Cost Tracking] Summary error:', error);
+      return {
+        total: 0,
+        byProvider: {},
+        byModel: {},
+        byClient: {},
+        trend: [],
+      };
+    }
+  }
+
+  /**
+   * Set budget for provider or client
+   */
+  setBudget(key, budget) {
+    this.budgets.set(key, {
+      limit: budget.limit,
+      period: budget.period || 'daily',
+      alertThreshold: budget.alertThreshold || 0.8,
+      currentUsage: 0,
+      lastReset: new Date(),
+    });
+    
+    console.log(`[Cost Tracking] Budget set for ${key}: $${budget.limit} per ${budget.period}`);
+  }
+
+  /**
+   * Check budget alerts
+   */
+  async checkBudgetAlerts(provider, cost, clientId) {
+    // Check provider budget
+    const providerBudget = this.budgets.get(`provider:${provider}`);
+    if (providerBudget) {
+      providerBudget.currentUsage += cost;
+      
+      const usagePercent = providerBudget.currentUsage / providerBudget.limit;
+      if (usagePercent >= providerBudget.alertThreshold) {
+        this.emit('budget_alert', {
+          type: 'provider',
+          key: provider,
+          usage: providerBudget.currentUsage,
+          limit: providerBudget.limit,
+          percent: usagePercent * 100,
+        });
+      }
+    }
+    
+    // Check client budget
+    if (clientId) {
+      const clientBudget = this.budgets.get(`client:${clientId}`);
+      if (clientBudget) {
+        clientBudget.currentUsage += cost;
+        
+        const usagePercent = clientBudget.currentUsage / clientBudget.limit;
+        if (usagePercent >= clientBudget.alertThreshold) {
+          this.emit('budget_alert', {
+            type: 'client',
+            key: clientId,
+            usage: clientBudget.currentUsage,
+            limit: clientBudget.limit,
+            percent: usagePercent * 100,
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * Get cost projection
+   */
+  async getCostProjection(timeRange = '7d') {
+    try {
+      const summary = await this.getCostSummary(timeRange);
+      
+      // Simple linear projection
+      const timeRangeHours = this.getTimeRangeHours(timeRange);
+      const hourlyRate = summary.total / timeRangeHours;
+      
+      return {
+        hourly: hourlyRate,
+        daily: hourlyRate * 24,
+        weekly: hourlyRate * 24 * 7,
+        monthly: hourlyRate * 24 * 30,
+      };
+    } catch (error) {
+      console.error('[Cost Tracking] Projection error:', error);
+      return { hourly: 0, daily: 0, weekly: 0, monthly: 0 };
+    }
+  }
+
+  /**
+   * Get cost comparison
+   */
+  async getCostComparison(model1, model2, estimatedTokens = 1000000) {
+    const providers = Object.keys(this.pricing);
+    const comparison = {};
+    
+    for (const provider of providers) {
+      const pricing1 = this.pricing[provider][model1];
+      const pricing2 = this.pricing[provider][model2];
+      
+      if (pricing1 && pricing2) {
+        const cost1 = (estimatedTokens / 1000000) * (pricing1.prompt + pricing1.completion) / 2;
+        const cost2 = (estimatedTokens / 1000000) * (pricing2.prompt + pricing2.completion) / 2;
+        
+        comparison[provider] = {
+          model1: { cost: cost1, perToken: cost1 / estimatedTokens },
+          model2: { cost: cost2, perToken: cost2 / estimatedTokens },
+          difference: cost1 - cost2,
+          percentDiff: ((cost1 - cost2) / cost1) * 100,
+        };
+      }
+    }
+    
+    return comparison;
+  }
+
+  /**
+   * Get pricing for a model
+   */
+  getModelPricing(provider, model) {
+    const providerPricing = this.pricing[provider];
+    if (!providerPricing) return null;
+    
+    return providerPricing[model] || providerPricing['default'] || null;
+  }
+
+  /**
+   * Update pricing
+   */
+  updatePricing(provider, model, pricing) {
+    if (!this.pricing[provider]) {
+      this.pricing[provider] = {};
+    }
+    
+    this.pricing[provider][model] = pricing;
+    console.log(`[Cost Tracking] Updated pricing for ${provider}/${model}`);
+  }
+
+  /**
+   * Helper: Get time range in hours
+   */
+  getTimeRangeHours(timeRange) {
+    const map = {
+      '1h': 1,
+      '24h': 24,
+      '7d': 24 * 7,
+      '30d': 24 * 30,
+    };
+    return map[timeRange] || 24;
+  }
+
+  /**
+   * Helper: Default analytics
+   */
+  getDefaultAnalytics() {
+    return {
+      total: 0,
+      breakdown: {},
+      trend: [],
+      topModels: [],
+      topClients: [],
+    };
+  }
+
+  /**
+   * Get health status
+   */
+  getHealthStatus() {
+    return {
+      status: 'healthy',
+      budgetsConfigured: this.budgets.size,
+      pricingProviders: Object.keys(this.pricing).length,
+    };
+  }
+}
+
+module.exports = CostTrackingService;

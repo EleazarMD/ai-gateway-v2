@@ -1,0 +1,115 @@
+# AI Gateway v2.0 - Quick Reference
+
+## Endpoint Patterns
+
+### ✅ CORRECT: Generic Endpoints
+
+```bash
+# Chat (all providers)
+POST /api/v1/chat/completions
+Body: { "model": "gpt-4|claude-4-sonnet|gemini-2.0|o1-preview", ... }
+
+# Images (all providers)
+POST /api/v1/images/generate
+Body: { "model": "dall-e-3|imagen-3|sdxl-1.0", ... }
+
+# MCP/External Tools (all providers)
+POST /api/v1/mcp/:provider/:action
+Example: /api/v1/mcp/tavily/search
+```
+
+### ❌ FORBIDDEN: Provider-Specific Endpoints
+
+```bash
+# DO NOT CREATE THESE
+POST /api/v1/openai/chat
+POST /api/v1/anthropic/chat
+POST /api/v1/tavily/search      # Use /api/v1/mcp/tavily/search
+```
+
+## Model Detection
+
+```javascript
+// OpenAI
+gpt-4, gpt-4-turbo, gpt-4o, gpt-3.5-turbo
+o1-preview, o1-mini             // Deep research
+dall-e-2, dall-e-3              // Images
+whisper-1, tts-1                // Audio
+
+// Anthropic
+claude-4-sonnet, claude-3-5-sonnet, claude-3-haiku
+
+// Google
+gemini-2.0-flash, gemini-1.5-pro
+imagen-3                        // Images
+textembedding-gecko             // Embeddings
+
+// Stability AI
+sdxl-1.0, sd-3.5-large, sd-ultra
+
+// Ollama (Local)
+llama3, mistral, mixtral, codellama
+```
+
+## Adding New Capability
+
+### LLM Capability (Model-Based)
+
+1. Create generic endpoint: `/api/v1/{capability}/{action}`
+2. Add provider detection logic
+3. Implement provider-specific routing
+4. Update documentation
+
+### External Tool (Config-Based)
+
+1. Add to `mcp-providers-config.json`:
+```json
+{
+  "provider-name": {
+    "baseUrl": "https://api.provider.com",
+    "actions": {
+      "action-name": {
+        "path": "/action",
+        "method": "POST",
+        "auth": "bearer"
+      }
+    },
+    "keyProvider": "provider-key-name"
+  }
+}
+```
+2. Use generic MCP proxy (no code changes!)
+
+## Quick Checks
+
+**Before creating new endpoint:**
+- [ ] Is this an LLM capability? → Use model-based routing
+- [ ] Is this an external tool? → Use MCP proxy
+- [ ] Does similar endpoint exist? → Extend existing
+- [ ] Will this scale to 100+ providers? → If no, redesign
+
+**Documentation updates:**
+- [ ] Updated GLOBAL_RULES_V3.md
+- [ ] Updated ENDPOINT_ARCHITECTURE.md  
+- [ ] Updated AIHDS_SERVICE_DISCOVERY_STANDARD.md
+- [ ] Created/updated memory
+
+## Common Mistakes
+
+❌ Creating `/api/v1/openai/images`  
+✅ Use `/api/v1/images/generate` with model parameter
+
+❌ Creating `/api/v1/tavily/search`  
+✅ Use `/api/v1/mcp/tavily/search`
+
+❌ Hardcoding provider URLs  
+✅ Use configuration files
+
+❌ Hardcoding API keys  
+✅ Fetch from AI Inferencing service
+
+## References
+
+- [Full Architecture Guide](./ENDPOINT_ARCHITECTURE.md)
+- [Global Rules](../../GLOBAL_RULES_V3.md#-ai-gateway-endpoint-architecture-level-1)
+- [Service Discovery Standard](../../AIHDS_SERVICE_DISCOVERY_STANDARD.md)

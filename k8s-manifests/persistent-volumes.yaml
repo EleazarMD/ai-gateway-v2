@@ -1,0 +1,74 @@
+# Persistent Volumes for AI Gateway + AHIS Server
+# Version: v2.1.0
+# Created: 2025-09-09
+
+# AI Gateway Config PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ai-gateway-config-pvc
+  namespace: ai-homelab-unified
+  labels:
+    app: ai-gateway
+    component: config-storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path
+
+---
+# AHIS Server Data PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ahis-server-data-pvc
+  namespace: ai-homelab-unified
+  labels:
+    app: ahis-server
+    component: data-storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: local-path
+
+---
+# ConfigMap for PORT_REGISTRY.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: port-registry-config
+  namespace: ai-homelab-unified
+  labels:
+    app: ahis-server
+    component: configuration
+data:
+  PORT_REGISTRY.yml: |
+    # Reference to official PORT_REGISTRY.yml
+    # This ConfigMap provides access to port assignments for AHIS server
+    version: 1.0.0
+    last_updated: '2025-09-09'
+    maintainer: '@eleazar'
+    
+    # Key port assignments for this deployment
+    ports:
+    - port: 7777
+      service: ai-gateway
+      component: api-server
+      description: AI Gateway internal service mesh port
+      status: active
+    - port: 8777
+      service: ai-gateway
+      component: external-api
+      description: AI Gateway external client API port
+      status: active
+    - port: 8888
+      service: ahis-server
+      component: api
+      description: AHIS Server API
+      status: active

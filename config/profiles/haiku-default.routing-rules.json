@@ -1,0 +1,170 @@
+{
+  "_comment": "4-Tier Cost-Optimized Routing Rules with Fast/Deep Mode. Rules evaluated top-down by priority. First match wins.",
+  "_modes": {
+    "fast": "Homelab-only: emails, research studio, podcasts, workspace AI, calendar. Uses free/cheap tiers (Qwen, Haiku).",
+    "deep": "External sources: web search, Perplexity, document analysis, cross-referencing. Uses capable tiers (Sonnet, Gemini)."
+  },
+  "routing_rules": [
+    {
+      "id": "openclaw_voice_chat",
+      "name": "OpenClaw Voice Chat → Haiku 4.5 (reliable browser/tool use, Sonnet refuses)",
+      "priority": 3,
+      "condition": {
+        "anyOf": [
+          {"field": "serviceId", "equals": "hyperspace-ios"},
+          {"field": "operationType", "equals": "voice_chat"}
+        ]
+      },
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-haiku-4-5",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "deep_mode_complex",
+      "name": "DISABLED: Was routing all Deep+high to Sonnet (token chugger, refuses browser)",
+      "priority": 5,
+      "condition": {},
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-sonnet-4-5",
+      "fallbackProviders": ["google-default"],
+      "enabled": false
+    },
+    {
+      "id": "deep_mode_longcontext",
+      "name": "Deep Mode: Long-Context/Research → Gemini 3 Flash (1M ctx)",
+      "priority": 6,
+      "condition": {
+        "allOf": [
+          {"field": "mode", "equals": "deep"},
+          {
+            "anyOf": [
+              {"field": "operationType", "in": ["long_context", "document_analysis", "large_summarization", "research", "web_search"]},
+              {"field": "maxTokens", "greaterThan": 20000},
+              {"field": "complexity", "equals": "low"}
+            ]
+          }
+        ]
+      },
+      "targetProvider": "google-default",
+      "targetModel": "gemini-3-flash-preview",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "deep_mode_simple",
+      "name": "Deep Mode: Simple External Query → Gemini 3 Flash",
+      "priority": 7,
+      "condition": {
+        "field": "mode", "equals": "deep"
+      },
+      "targetProvider": "google-default",
+      "targetModel": "gemini-3-flash-preview",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier1_sonnet_complex",
+      "name": "Tier 1: Explicit Complex Reasoning ONLY → Sonnet 4.5 (minimized usage)",
+      "priority": 10,
+      "condition": {
+        "field": "operationType", "in": ["complex_reasoning", "deep_research"]
+      },
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-sonnet-4-5",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "fast_mode_tools",
+      "name": "Fast Mode: Homelab Tool-Calling → Haiku 4.5",
+      "priority": 15,
+      "condition": {
+        "allOf": [
+          {"field": "mode", "equals": "fast"},
+          {"field": "hasTools", "equals": true}
+        ]
+      },
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-haiku-4-5",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "fast_mode_chat",
+      "name": "Fast Mode: Simple Homelab Chat → Qwen3-32B (free)",
+      "priority": 16,
+      "condition": {
+        "field": "mode", "equals": "fast"
+      },
+      "targetProvider": "openai-qwen3-32b-local",
+      "targetModel": "qwen3-32b",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier2_haiku_tools",
+      "name": "Tier 2: Standard Tool-Calling → Haiku 4.5",
+      "priority": 20,
+      "condition": {
+        "allOf": [
+          {"field": "hasTools", "equals": true},
+          {"field": "complexity", "in": ["medium", "low"]}
+        ]
+      },
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-haiku-4-5",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier3_qwen_local",
+      "name": "Tier 3: Simple/Local Chat → Qwen3-32B (free, 24K ctx)",
+      "priority": 30,
+      "condition": {
+        "anyOf": [
+          {"field": "sensitivity", "in": ["restricted", "local_only"]},
+          {
+            "allOf": [
+              {"field": "hasTools", "equals": false},
+              {"field": "complexity", "in": ["low", "medium"]},
+              {"field": "taskStream", "in": ["edge", "downstream"]}
+            ]
+          }
+        ]
+      },
+      "targetProvider": "openai-qwen3-32b-local",
+      "targetModel": "qwen3-32b",
+      "fallbackProviders": ["google-default"],
+      "enabled": true
+    },
+    {
+      "id": "tier4_gemini_longcontext",
+      "name": "Tier 4: Long-Context/Overflow → Gemini 3 Flash (1M ctx)",
+      "priority": 40,
+      "condition": {
+        "anyOf": [
+          {"field": "operationType", "in": ["long_context", "document_analysis", "large_summarization", "research"]},
+          {"field": "maxTokens", "greaterThan": 20000}
+        ]
+      },
+      "targetProvider": "google-default",
+      "targetModel": "gemini-3-flash-preview",
+      "fallbackProviders": ["anthropic-default"],
+      "enabled": true
+    },
+    {
+      "id": "default_haiku_fallback",
+      "name": "Default: No context → Haiku 4.5 (reliable, good tool use)",
+      "priority": 100,
+      "condition": {},
+      "targetProvider": "anthropic-default",
+      "targetModel": "claude-haiku-4-5",
+      "fallbackProviders": [
+        "google-default",
+        "openai-qwen3-32b-local"
+      ],
+      "enabled": true
+    }
+  ]
+}

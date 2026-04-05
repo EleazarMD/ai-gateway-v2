@@ -1,0 +1,88 @@
+{
+  "$schema": "./mcp-providers-schema.json",
+  "version": "1.0.0",
+  "providers": {
+    "tavily": {
+      "baseUrl": "https://api.tavily.com",
+      "description": "Real-time web search optimized for AI agents and RAG",
+      "actions": {
+        "search": {
+          "path": "/search",
+          "method": "POST",
+          "auth": "bearer",
+          "description": "Search the web for relevant information",
+          "rateLimit": {
+            "requestsPerMinute": 60,
+            "requestsPerDay": 1000
+          }
+        },
+        "extract": {
+          "path": "/extract",
+          "method": "POST",
+          "auth": "bearer",
+          "description": "Extract clean content from URLs"
+        }
+      },
+      "keyProvider": "tavily",
+      "timeout": 30000,
+      "costPerInvocation": 0.001
+    },
+    "serper": {
+      "baseUrl": "https://google.serper.dev",
+      "description": "Google Search API via Serper",
+      "actions": {
+        "search": {
+          "path": "/search",
+          "method": "POST",
+          "auth": "api-key-header",
+          "description": "Search Google via Serper API"
+        }
+      },
+      "keyProvider": "serper",
+      "timeout": 10000,
+      "costPerInvocation": 0.0005
+    },
+    "browserless": {
+      "baseUrl": "https://chrome.browserless.io",
+      "description": "Headless Chrome automation",
+      "actions": {
+        "screenshot": {
+          "path": "/screenshot",
+          "method": "POST",
+          "auth": "query-token",
+          "description": "Take screenshot of a webpage"
+        },
+        "pdf": {
+          "path": "/pdf",
+          "method": "POST",
+          "auth": "query-token",
+          "description": "Generate PDF from a webpage"
+        }
+      },
+      "keyProvider": "browserless",
+      "timeout": 60000,
+      "costPerInvocation": 0.002
+    },
+    "firecrawl": {
+      "baseUrl": "https://api.firecrawl.dev/v1",
+      "description": "Web scraping and crawling API",
+      "actions": {
+        "scrape": {
+          "path": "/scrape",
+          "method": "POST",
+          "auth": "bearer",
+          "description": "Scrape content from a single URL"
+        },
+        "crawl": {
+          "path": "/crawl",
+          "method": "POST",
+          "auth": "bearer",
+          "description": "Crawl multiple pages from a website"
+        }
+      },
+      "keyProvider": "firecrawl",
+      "timeout": 120000,
+      "costPerInvocation": 0.005
+    }
+  }
+}
