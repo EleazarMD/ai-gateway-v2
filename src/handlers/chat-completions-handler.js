@@ -169,6 +169,42 @@ class ChatCompletionsHandler {
     if (body.tools) chars += JSON.stringify(body.tools).length;
     return Math.ceil(chars / 4); // ~4 chars per token
   }
+
+  async ensurePerplexityProviderForSonar(model) {
+    const normalizedModel = typeof model === 'string' ? model.toLowerCase() : '';
+    if (!normalizedModel.startsWith('sonar')) {
+      return;
+    }
+
+    const activeProviders = this.providerManager.getActiveProviders();
+    if (activeProviders.includes('perplexity-default')) {
+      return;
+    }
+
+    if (!this.inferencingClient) {
+      console.warn('[Chat Completions] sonar requested but AI Inferencing client unavailable for Perplexity resync');
+      return;
+    }
+
+    try {
+      const apiKey = await this.inferencingClient.getKey('ai-gateway', 'perplexity');
+      if (!apiKey) {
+        console.warn('[Chat Completions] sonar requested but no Perplexity key returned by AI Inferencing');
+        return;
+      }
+
+      await this.providerManager.loadProvider({
+        id: 'perplexity-default',
+        type: 'perplexity',
+        apiKey,
+        enabled: true
+      });
+
+      console.log('[Chat Completions] Re-synced Perplexity provider from AI Inferencing for sonar request');
+    } catch (error) {
+      console.warn('[Chat Completions] Failed to re-sync Perplexity provider for sonar request:', error.message);
+    }
+  }
   
   /**
    * Handle chat completion request with streaming support
@@ -194,6 +230,8 @@ class ChatCompletionsHandler {
       // Model aliasing for compatibility
       model = this.applyModelAliasing(model);
       req.body.model = model;
+
+      await this.ensurePerplexityProviderForSonar(model);
       
       // TRAVEL-AWARE REGIONALIZATION: Extract timezone from headers
       // Priority: 1. X-User-Timezone header, 2. _context.timezone, 3. Default (America/Chicago)

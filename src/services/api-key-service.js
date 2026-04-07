@@ -84,10 +84,13 @@ class APIKeyService {
     const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
 
     // Check cache first
+    console.log('[APIKeyService] Looking up hash:', keyHash, 'cache size:', this.keyCache.size);
     const cached = this.keyCache.get(keyHash);
+    console.log('[APIKeyService] Cache hit:', !!cached);
     if (cached) {
       // Check if cache is still fresh
       if (Date.now() - cached.cachedAt < this.cacheExpiry) {
+        console.log('[APIKeyService] Returning valid from cache for:', cached.component);
         return {
           valid: true,
           component: cached.component,
