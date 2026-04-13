@@ -295,22 +295,22 @@ async function initializeServices() {
     console.log('⚠️  Qwen Vision provider failed:', e.message);
   }
   
-  // Load MiniMax M2.5 provider (OpenAI-compatible API via local vLLM)
+  // Load MiniMax M2.7 provider (OpenAI-compatible API via local ik_llama.cpp)
   // MiniMax uses OpenAI chat completions format on port 8010
   if (process.env.MINIMAX_API_KEY) {
     try {
-      console.log('🤖 Loading MiniMax M2.5 provider...');
+      console.log('🤖 Loading MiniMax M2.7 provider...');
       await providerManager.loadProvider({
         id: 'minimax-default',
-        name: 'MiniMax M2.5 (230B MoE)',
+        name: 'MiniMax M2.7 (230B MoE)',
         type: 'openai',
         apiKey: process.env.MINIMAX_API_KEY,
         endpoint: process.env.MINIMAX_ENDPOINT || 'http://localhost:8010/v1',
-        models: ['minimax-m2.5', 'minimax-m2-5'],
+        models: ['minimax-m2.7', 'minimax-m2-7', 'minimax-m2.5', 'minimax-m2-5'],
         enabled: true,
         capabilities: ['chat', 'reasoning', 'function_calling', 'agentic', 'long_context', 'tool_use', 'browser_automation']
       });
-      console.log('✅ MiniMax M2.5 provider loaded');
+      console.log('✅ MiniMax M2.7 provider loaded');
     } catch (e) {
       console.log('⚠️  MiniMax provider failed:', e.message);
     }

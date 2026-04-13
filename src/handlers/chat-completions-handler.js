@@ -276,6 +276,19 @@ class ChatCompletionsHandler {
         delete req.body.tool_choice;
       }
       
+      // MiniMax M2.7 reasoning model: thinking tokens consume max_tokens budget
+      // Must set max_tokens high enough for reasoning + visible content
+      if (req.body.model && req.body.model.includes('minimax')) {
+        const minimaxMinTokens = 4096;
+        if (!req.body.max_tokens || req.body.max_tokens < minimaxMinTokens) {
+          console.log(`[Chat Completions] MiniMax: Raising max_tokens ${req.body.max_tokens || 'unset'} → ${minimaxMinTokens}`);
+          req.body.max_tokens = minimaxMinTokens;
+        }
+        if (!req.body.temperature || req.body.temperature === 0) {
+          req.body.temperature = 0.7;
+        }
+      }
+
       // Qwen3 instruct optimization: apply recommended sampling parameters
       // Per Qwen3 best practices: temp=0.7, top_p=0.8, presence_penalty=1.05
       // Avoids greedy decoding (temp=0) which causes repetition loops
@@ -880,19 +893,19 @@ class ChatCompletionsHandler {
       }
       // Deep + complex/agentic/tools → MiniMax M2.5 (230B MoE, excellent tool use)
       if (complexity === 'high' || complexity === 'medium' || hasTools) {
-        console.log(`[Auto-Routing] Deep mode + complex/tools → minimax-m2.5`);
-        return 'minimax-m2.5';
+        console.log(`[Auto-Routing] Deep mode + complex/tools → minimax-m2.7`);
+        return 'minimax-m2.7';
       }
       // Deep + simple → MiniMax M2.5
-      console.log(`[Auto-Routing] Deep mode + simple → minimax-m2.5`);
-      return 'minimax-m2.5';
+      console.log(`[Auto-Routing] Deep mode + simple → minimax-m2.7`);
+      return 'minimax-m2.7';
     }
     
     // Priority 2: Fast mode routing (homelab-only)
     if (mode === 'fast') {
       // Fast → MiniMax M2.5 (primary model, replaces Qwen3)
-      console.log(`[Auto-Routing] Fast mode → minimax-m2.5`);
-      return 'minimax-m2.5';
+      console.log(`[Auto-Routing] Fast mode → minimax-m2.7`);
+      return 'minimax-m2.7';
     }
     
     // Priority 3: No mode specified - use task stream / complexity
@@ -904,8 +917,8 @@ class ChatCompletionsHandler {
     
     // All other tasks (agentic, tools, chat) → MiniMax M2.5
     // Primary model for all routing: 230B MoE, excellent function calling, no refusals
-    console.log(`[Auto-Routing] Default → minimax-m2.5 [UPDATED_2026_03_05]`);
-    return 'minimax-m2.5';
+    console.log(`[Auto-Routing] Default → minimax-m2.7 [UPDATED_2026_03_05]`);
+    return 'minimax-m2.7';
   }
   
   /**

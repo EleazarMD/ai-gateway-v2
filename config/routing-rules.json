@@ -35,7 +35,7 @@
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.5",
+      "targetModel": "minimax-m2.7",
       "fallbackProviders": ["google-default"],
       "enabled": true
     },
@@ -50,7 +50,7 @@
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.5",
+      "targetModel": "minimax-m2.7",
       "fallbackProviders": ["google-default"],
       "enabled": true
     },
@@ -65,7 +65,7 @@
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.5",
+      "targetModel": "minimax-m2.7",
       "fallbackProviders": ["google-default"],
       "enabled": true
     },
@@ -120,7 +120,7 @@
         "field": "operationType", "in": ["complex_reasoning", "deep_research"]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.5",
+      "targetModel": "minimax-m2.7",
       "fallbackProviders": ["google-default"],
       "enabled": true
     },
@@ -135,7 +135,7 @@
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.5",
+      "targetModel": "minimax-m2.7",
       "fallbackProviders": ["google-default"],
       "enabled": true
     },
@@ -162,7 +162,7 @@
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.5",
+      "targetModel": "minimax-m2.7",
       "fallbackProviders": ["google-default"],
       "enabled": true
     },
@@ -208,7 +208,7 @@
       "priority": 100,
       "condition": {},
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.5",
+      "targetModel": "minimax-m2.7",
       "fallbackProviders": ["google-default"],
       "enabled": true
     }
