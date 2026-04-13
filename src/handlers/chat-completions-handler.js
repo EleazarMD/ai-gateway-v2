@@ -276,25 +276,36 @@ class ChatCompletionsHandler {
         delete req.body.tool_choice;
       }
       
-      // MiniMax M2.7 reasoning model: pass through enable_thinking from client
-      // Client controls thinking via chat_template_kwargs.enable_thinking or _context.enable_thinking
-      // Default: true (thinking ON) — client sends false for fast/simple queries
+      // ── Thinking level: standardized across ecosystem ──────────────
+      // Every component declares thinking needs: low | medium | high
+      //   low    → no thinking, prioritize speed (~85 tok/s, sub-second)
+      //   medium → thinking enabled, standard budget (default for most agents)
+      //   high   → thinking enabled, extended budget (complex reasoning chains)
+      // Sources: _context.thinking, x-thinking header, or body.thinking
+      // Default: medium (thinking ON, reasonable budget)
+      const thinkingLevel = req.body.thinking
+        || req.body._context?.thinking
+        || req.headers['x-thinking']
+        || 'medium';
+
+      // MiniMax M2.7 reasoning model: map thinking level to model behavior
       if (req.body.model && req.body.model.includes('minimax')) {
         if (!req.body.temperature || req.body.temperature === 0) {
           req.body.temperature = 0.7;
         }
         if (!req.body.chat_template_kwargs) req.body.chat_template_kwargs = {};
-        // Client can set via chat_template_kwargs, _context, or x-enable-thinking header
-        const clientThinking = req.body.chat_template_kwargs.enable_thinking
-          ?? req.body._context?.enable_thinking
-          ?? (req.headers['x-enable-thinking'] !== 'false');
-        req.body.chat_template_kwargs.enable_thinking = clientThinking;
 
-        const minimaxMinTokens = clientThinking ? 8192 : 4096;
-        if (!req.body.max_tokens || req.body.max_tokens < minimaxMinTokens) {
-          req.body.max_tokens = minimaxMinTokens;
+        const thinkingConfig = {
+          low:    { enable: false, minTokens: 4096  },
+          medium: { enable: true,  minTokens: 8192  },
+          high:   { enable: true,  minTokens: 16384 },
+        }[thinkingLevel] || { enable: true, minTokens: 8192 };
+
+        req.body.chat_template_kwargs.enable_thinking = thinkingConfig.enable;
+        if (!req.body.max_tokens || req.body.max_tokens < thinkingConfig.minTokens) {
+          req.body.max_tokens = thinkingConfig.minTokens;
         }
-        console.log(`[Chat Completions] MiniMax: thinking=${clientThinking}, max_tokens=${req.body.max_tokens}`);
+        console.log(`[Chat Completions] MiniMax: thinking=${thinkingLevel}, enable=${thinkingConfig.enable}, max_tokens=${req.body.max_tokens}`);
       }
 
       // Qwen3 instruct optimization: apply recommended sampling parameters
