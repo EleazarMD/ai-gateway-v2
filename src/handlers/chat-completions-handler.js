@@ -276,16 +276,38 @@ class ChatCompletionsHandler {
         delete req.body.tool_choice;
       }
       
-      // MiniMax M2.7 reasoning model: thinking tokens consume max_tokens budget
-      // Must set max_tokens high enough for reasoning + visible content
+      // MiniMax M2.7 reasoning model: adaptive thinking via chat_template_kwargs
+      // Custom template supports enable_thinking (true/false) to control <think> tag
+      // Simple/fast queries → thinking OFF (fast, ~85 tok/s)
+      // Complex/deep/agent/tool queries → thinking ON (better reasoning)
       if (req.body.model && req.body.model.includes('minimax')) {
-        const minimaxMinTokens = 4096;
-        if (!req.body.max_tokens || req.body.max_tokens < minimaxMinTokens) {
-          console.log(`[Chat Completions] MiniMax: Raising max_tokens ${req.body.max_tokens || 'unset'} → ${minimaxMinTokens}`);
-          req.body.max_tokens = minimaxMinTokens;
-        }
         if (!req.body.temperature || req.body.temperature === 0) {
           req.body.temperature = 0.7;
+        }
+
+        const hasTools = req.body.tools && req.body.tools.length > 0;
+        const isDeepMode = mode === 'deep';
+        const isAgent = req.body._context?.is_agent || req.headers['x-agent'];
+        const isComplex = req.body._context?.complexity === 'high' || req.body._context?.complexity === 'medium';
+        const needsThinking = hasTools || isDeepMode || isAgent || isComplex;
+
+        if (!req.body.chat_template_kwargs) req.body.chat_template_kwargs = {};
+        req.body.chat_template_kwargs.enable_thinking = needsThinking;
+
+        if (needsThinking) {
+          // Thinking ON: raise max_tokens to accommodate reasoning + response
+          const minimaxMinTokens = 8192;
+          if (!req.body.max_tokens || req.body.max_tokens < minimaxMinTokens) {
+            req.body.max_tokens = minimaxMinTokens;
+          }
+          console.log(`[Chat Completions] MiniMax: Thinking ON (tools=${hasTools}, deep=${isDeepMode}, agent=${!!isAgent}, complex=${isComplex}), max_tokens=${req.body.max_tokens}`);
+        } else {
+          // Thinking OFF: lower budget sufficient, faster responses
+          const minimaxMinTokens = 4096;
+          if (!req.body.max_tokens || req.body.max_tokens < minimaxMinTokens) {
+            req.body.max_tokens = minimaxMinTokens;
+          }
+          console.log(`[Chat Completions] MiniMax: Thinking OFF (fast mode), max_tokens=${req.body.max_tokens}`);
         }
       }
 
