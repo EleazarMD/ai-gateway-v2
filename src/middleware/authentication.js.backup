@@ -76,18 +76,6 @@ async function authenticateInternal(req, res, next) {
  * More permissive - allows standard API key and child safety key
  */
 async function authenticateExternal(req, res, next) {
-  // Bypass auth for Tailscale network (100.x.x.x)
-  const clientIp = req.ip || req.connection.remoteAddress;
-  if (clientIp && clientIp.startsWith("100.")) {
-    req.apiKey = "tailscale-bypass";
-    req.component = "picode-tailscale";
-    req.componentType = "client";
-    req.scopes = ["read", "write"];
-    req.rateLimitTier = "high";
-    req.isInternal = true;
-    return next();
-  }
-
   const apiKey = req.headers['x-api-key'] || 
                  req.headers['authorization']?.replace('Bearer ', '');
   
