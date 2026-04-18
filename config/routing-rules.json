@@ -6,37 +6,118 @@
   },
   "routing_rules": [
     {
+      "id": "zhipu_direct",
+      "name": "Direct: GLM-5/5.1 requests go straight to zhipu-default",
+      "priority": 0,
+      "condition": {
+        "anyOf": [
+          {
+            "field": "model",
+            "equals": "glm-5"
+          },
+          {
+            "field": "model",
+            "equals": "glm-5.1"
+          }
+        ]
+      },
+      "targetProvider": "zhipu-default",
+      "targetModel": "glm-5",
+      "useRequestedModel": true,
+      "fallbackProviders": [],
+      "enabled": true
+    },
+    {
+      "id": "glm_zhipu",
+      "name": "GLM Models \u2192 ZhipuAI (api.z.ai)",
+      "priority": 0,
+      "condition": {
+        "field": "model",
+        "in": [
+          "glm-5",
+          "glm-5.1",
+          "glm-4.5-air"
+        ]
+      },
+      "targetProvider": "zhipu-default",
+      "targetModel": "glm-5",
+      "fallbackProviders": [],
+      "enabled": true
+    },
+    {
+      "id": "minimax_local",
+      "name": "MiniMax Models \u2192 Local vLLM (RTX, port 8010)",
+      "priority": 0,
+      "condition": {
+        "field": "model",
+        "in": [
+          "minimax-m2.7",
+          "minimax-m2.5",
+          "minimax-m2-7",
+          "minimax-m2-5"
+        ]
+      },
+      "targetProvider": "minimax-default",
+      "targetModel": "minimax-m2.7",
+      "fallbackProviders": [],
+      "enabled": true
+    },
+    {
       "id": "qwen_vision_local",
-      "name": "Qwen Vision → Local vLLM (RTX, port 8792, multimodal)",
+      "name": "Qwen Vision \u2192 Local vLLM (RTX, port 8792, multimodal)",
       "priority": 1,
       "condition": {
-        "field": "model", "in": ["qwen-vision", "qwen-vlm", "qwen-vision-7b"]
+        "field": "model",
+        "in": [
+          "qwen-vision",
+          "qwen-vlm",
+          "qwen-vision-7b"
+        ]
       },
       "targetProvider": "qwen-vision-local",
       "targetModel": "qwen-vision",
-      "fallbackProviders": ["google-default"],
+      "fallbackProviders": [],
       "enabled": true
     },
     {
       "id": "browser_commerce_minimax",
-      "name": "Browser Commerce Tasks → MiniMax M2.5 (no safety restrictions, excellent tool use)",
+      "name": "Browser Commerce Tasks \u2192 MiniMax M2.5 (no safety restrictions, excellent tool use)",
       "priority": 2,
       "condition": {
         "allOf": [
-          {"field": "hasTools", "equals": true},
+          {
+            "field": "hasTools",
+            "equals": true
+          },
           {
             "anyOf": [
-              {"field": "operationType", "in": ["browser_automation", "web_ordering", "commerce"]},
-              {"field": "messageContent", "contains": "starbucks"},
-              {"field": "messageContent", "contains": "order"},
-              {"field": "messageContent", "contains": "browser"}
+              {
+                "field": "operationType",
+                "in": [
+                  "browser_automation",
+                  "web_ordering",
+                  "commerce"
+                ]
+              },
+              {
+                "field": "messageContent",
+                "contains": "starbucks"
+              },
+              {
+                "field": "messageContent",
+                "contains": "order"
+              },
+              {
+                "field": "messageContent",
+                "contains": "browser"
+              }
             ]
           }
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.7",
-      "fallbackProviders": ["google-default"],
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": [],
       "enabled": true
     },
     {
@@ -45,28 +126,40 @@
       "priority": 2,
       "condition": {
         "allOf": [
-          {"field": "hasTools", "equals": true},
-          {"field": "requestedModel", "contains": "minimax"}
+          {
+            "field": "hasTools",
+            "equals": true
+          },
+          {
+            "field": "requestedModel",
+            "contains": "minimax"
+          }
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.7",
-      "fallbackProviders": ["google-default"],
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": [],
       "enabled": true
     },
     {
       "id": "openclaw_voice_chat",
-      "name": "OpenClaw Voice Chat → MiniMax M2.5 (excellent tool use, no refusals)",
+      "name": "OpenClaw Voice Chat \u2192 MiniMax M2.5 (excellent tool use, no refusals)",
       "priority": 3,
       "condition": {
         "anyOf": [
-          {"field": "serviceId", "equals": "hyperspace-ios"},
-          {"field": "operationType", "equals": "voice_chat"}
+          {
+            "field": "serviceId",
+            "equals": "hyperspace-ios"
+          },
+          {
+            "field": "operationType",
+            "equals": "voice_chat"
+          }
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.7",
-      "fallbackProviders": ["google-default"],
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": [],
       "enabled": true
     },
     {
@@ -76,40 +169,59 @@
       "condition": {},
       "targetProvider": "anthropic-default",
       "targetModel": "claude-sonnet-4-5",
-      "fallbackProviders": ["google-default"],
+      "fallbackProviders": [],
       "enabled": false
     },
     {
       "id": "deep_mode_longcontext",
-      "name": "Deep Mode: Long-Context/Research → Gemini 3 Flash (1M ctx)",
+      "name": "Deep Mode: Long-Context/Research \u2192 Gemini 3 Flash (1M ctx)",
       "priority": 6,
       "condition": {
         "allOf": [
-          {"field": "mode", "equals": "deep"},
+          {
+            "field": "mode",
+            "equals": "deep"
+          },
           {
             "anyOf": [
-              {"field": "operationType", "in": ["long_context", "document_analysis", "large_summarization", "research", "web_search"]},
-              {"field": "maxTokens", "greaterThan": 20000},
-              {"field": "complexity", "equals": "low"}
+              {
+                "field": "operationType",
+                "in": [
+                  "long_context",
+                  "document_analysis",
+                  "large_summarization",
+                  "research",
+                  "web_search"
+                ]
+              },
+              {
+                "field": "maxTokens",
+                "greaterThan": 20000
+              },
+              {
+                "field": "complexity",
+                "equals": "low"
+              }
             ]
           }
         ]
       },
       "targetProvider": "google-default",
       "targetModel": "gemini-3-flash-preview",
-      "fallbackProviders": ["google-default"],
+      "fallbackProviders": [],
       "enabled": true
     },
     {
       "id": "deep_mode_simple",
-      "name": "Deep Mode: Simple External Query → Gemini 3 Flash",
+      "name": "Deep Mode: Simple External Query \u2192 Gemini 3 Flash",
       "priority": 7,
       "condition": {
-        "field": "mode", "equals": "deep"
+        "field": "mode",
+        "equals": "deep"
       },
       "targetProvider": "google-default",
       "targetModel": "gemini-3-flash-preview",
-      "fallbackProviders": ["google-default"],
+      "fallbackProviders": [],
       "enabled": true
     },
     {
@@ -117,99 +229,151 @@
       "name": "DISABLED: Tier 1 Sonnet (no Anthropic temporarily)",
       "priority": 10,
       "condition": {
-        "field": "operationType", "in": ["complex_reasoning", "deep_research"]
+        "field": "operationType",
+        "in": [
+          "complex_reasoning",
+          "deep_research"
+        ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.7",
-      "fallbackProviders": ["google-default"],
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": [],
       "enabled": true
     },
     {
       "id": "fast_mode_tools",
-      "name": "Fast Mode: Homelab Tool-Calling → MiniMax (no Anthropic temporarily)",
+      "name": "Fast Mode: Homelab Tool-Calling \u2192 MiniMax (no Anthropic temporarily)",
       "priority": 15,
       "condition": {
         "allOf": [
-          {"field": "mode", "equals": "fast"},
-          {"field": "hasTools", "equals": true}
+          {
+            "field": "mode",
+            "equals": "fast"
+          },
+          {
+            "field": "hasTools",
+            "equals": true
+          }
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.7",
-      "fallbackProviders": ["google-default"],
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": [],
       "enabled": true
     },
     {
       "id": "fast_mode_chat",
-      "name": "Fast Mode: Simple Homelab Chat → Qwen3-32B (free)",
+      "name": "Fast Mode: Simple Homelab Chat \u2192 Qwen3-32B (free)",
       "priority": 16,
       "condition": {
-        "field": "mode", "equals": "fast"
+        "field": "mode",
+        "equals": "fast"
       },
       "targetProvider": "openai-qwen3-32b-local",
       "targetModel": "qwen3-32b",
-      "fallbackProviders": ["google-default"],
+      "fallbackProviders": [],
       "enabled": true
     },
     {
       "id": "tier2_haiku_tools",
-      "name": "Tier 2: Standard Tool-Calling → MiniMax (no Anthropic temporarily)",
+      "name": "Tier 2: Standard Tool-Calling \u2192 MiniMax (no Anthropic temporarily)",
       "priority": 20,
       "condition": {
         "allOf": [
-          {"field": "hasTools", "equals": true},
-          {"field": "complexity", "in": ["medium", "low"]}
+          {
+            "field": "hasTools",
+            "equals": true
+          },
+          {
+            "field": "complexity",
+            "in": [
+              "medium",
+              "low"
+            ]
+          }
         ]
       },
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.7",
-      "fallbackProviders": ["google-default"],
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": [],
       "enabled": true
     },
     {
       "id": "tier3_qwen_local",
-      "name": "Tier 3: Simple/Local Chat → Qwen3-32B (free, 24K ctx)",
+      "name": "Tier 3: Simple/Local Chat \u2192 Qwen3-32B (free, 24K ctx)",
       "priority": 30,
       "condition": {
         "anyOf": [
-          {"field": "sensitivity", "in": ["restricted", "local_only"]},
+          {
+            "field": "sensitivity",
+            "in": [
+              "restricted",
+              "local_only"
+            ]
+          },
           {
             "allOf": [
-              {"field": "hasTools", "equals": false},
-              {"field": "complexity", "in": ["low", "medium"]},
-              {"field": "taskStream", "in": ["edge", "downstream"]}
+              {
+                "field": "hasTools",
+                "equals": false
+              },
+              {
+                "field": "complexity",
+                "in": [
+                  "low",
+                  "medium"
+                ]
+              },
+              {
+                "field": "taskStream",
+                "in": [
+                  "edge",
+                  "downstream"
+                ]
+              }
             ]
           }
         ]
       },
       "targetProvider": "openai-qwen3-32b-local",
       "targetModel": "qwen3-32b",
-      "fallbackProviders": ["google-default"],
+      "fallbackProviders": [],
       "enabled": true
     },
     {
       "id": "tier4_gemini_longcontext",
-      "name": "Tier 4: Long-Context/Overflow → Gemini 3 Flash (1M ctx)",
+      "name": "Tier 4: Long-Context/Overflow \u2192 Gemini 3 Flash (1M ctx)",
       "priority": 40,
       "condition": {
         "anyOf": [
-          {"field": "operationType", "in": ["long_context", "document_analysis", "large_summarization", "research"]},
-          {"field": "maxTokens", "greaterThan": 20000}
+          {
+            "field": "operationType",
+            "in": [
+              "long_context",
+              "document_analysis",
+              "large_summarization",
+              "research"
+            ]
+          },
+          {
+            "field": "maxTokens",
+            "greaterThan": 20000
+          }
         ]
       },
       "targetProvider": "google-default",
       "targetModel": "gemini-3-flash-preview",
-      "fallbackProviders": ["google-default"],
+      "fallbackProviders": [],
       "enabled": true
     },
     {
       "id": "default_minimax_fallback",
-      "name": "Default: All tasks → MiniMax M2.5 (primary model, excellent tool use)",
+      "name": "Default: All tasks \u2192 MiniMax M2.5 (primary model, excellent tool use)",
       "priority": 100,
       "condition": {},
       "targetProvider": "minimax-default",
-      "targetModel": "minimax-m2.7",
-      "fallbackProviders": ["google-default"],
+      "targetModel": "minimax-m2.5",
+      "fallbackProviders": [],
       "enabled": true
     }
   ]

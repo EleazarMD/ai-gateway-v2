@@ -276,59 +276,6 @@ class ChatCompletionsHandler {
         delete req.body.tool_choice;
       }
       
-      // ── Thinking level: standardized across ecosystem ──────────────
-      // Every component declares thinking needs: low | medium | high
-      //   low    → no thinking, prioritize speed (~85 tok/s, sub-second)
-      //   medium → thinking enabled, standard budget (default for most agents)
-      //   high   → thinking enabled, extended budget (complex reasoning chains)
-      // Sources: _context.thinking, x-thinking header, or body.thinking
-      // Default: medium (thinking ON, reasonable budget)
-      const thinkingLevel = req.body.thinking
-        || req.body._context?.thinking
-        || req.headers['x-thinking']
-        || 'medium';
-
-      // MiniMax M2.7 reasoning model: map thinking level to model behavior
-      if (req.body.model && req.body.model.includes('minimax')) {
-        // Validate prompt size to prevent server crashes (llama.cpp segfaults on oversized prompts)
-        // Context limit: 128K tokens, safe limit: 120K (leave headroom for response)
-        const estimateTokens = (messages) => {
-          const text = messages.map(m => m.content || '').join(' ');
-          return Math.ceil(text.length / 4); // ~4 chars/token average
-        };
-        
-        const promptTokens = estimateTokens(req.body.messages || []);
-        const maxPromptTokens = 120000; // Safe limit (128K context - 8K response buffer)
-        
-        if (promptTokens > maxPromptTokens) {
-          return res.status(400).json({
-            error: {
-              message: `Prompt too large: ${promptTokens} tokens (max ${maxPromptTokens}). Context limit is 128K tokens. Please reduce workspace/file content.`,
-              type: 'invalid_request_error',
-              param: 'messages',
-              code: 'context_length_exceeded'
-            }
-          });
-        }
-        
-        if (!req.body.temperature || req.body.temperature === 0) {
-          req.body.temperature = 0.7;
-        }
-        if (!req.body.chat_template_kwargs) req.body.chat_template_kwargs = {};
-
-        const thinkingConfig = {
-          low:    { enable: false, minTokens: 4096  },
-          medium: { enable: true,  minTokens: 8192  },
-          high:   { enable: true,  minTokens: 16384 },
-        }[thinkingLevel] || { enable: true, minTokens: 8192 };
-
-        req.body.chat_template_kwargs.enable_thinking = thinkingConfig.enable;
-        if (!req.body.max_tokens || req.body.max_tokens < thinkingConfig.minTokens) {
-          req.body.max_tokens = thinkingConfig.minTokens;
-        }
-        console.log(`[Chat Completions] MiniMax: prompt=${promptTokens} tokens, thinking=${thinkingLevel}, max_tokens=${req.body.max_tokens}`);
-      }
-
       // Qwen3 instruct optimization: apply recommended sampling parameters
       // Per Qwen3 best practices: temp=0.7, top_p=0.8, presence_penalty=1.05
       // Avoids greedy decoding (temp=0) which causes repetition loops
@@ -931,19 +878,19 @@ class ChatCompletionsHandler {
         console.log(`[Auto-Routing] Deep mode + long-context → gemini-3-flash-preview`);
         return 'gemini-3-flash-preview';
       }
-      // Deep + complex/agentic/tools → MiniMax M2.5 (230B MoE, excellent tool use)
+      // Deep + complex/agentic/tools → MiniMax M2.7 (excellent tool use)
       if (complexity === 'high' || complexity === 'medium' || hasTools) {
         console.log(`[Auto-Routing] Deep mode + complex/tools → minimax-m2.7`);
         return 'minimax-m2.7';
       }
-      // Deep + simple → MiniMax M2.5
+      // Deep + simple → MiniMax M2.7
       console.log(`[Auto-Routing] Deep mode + simple → minimax-m2.7`);
       return 'minimax-m2.7';
     }
     
     // Priority 2: Fast mode routing (homelab-only)
     if (mode === 'fast') {
-      // Fast → MiniMax M2.5 (primary model, replaces Qwen3)
+      // Fast → MiniMax M2.7 (primary model)
       console.log(`[Auto-Routing] Fast mode → minimax-m2.7`);
       return 'minimax-m2.7';
     }
@@ -955,9 +902,9 @@ class ChatCompletionsHandler {
       return 'gemini-3-flash-preview';
     }
     
-    // All other tasks (agentic, tools, chat) → MiniMax M2.5
-    // Primary model for all routing: 230B MoE, excellent function calling, no refusals
-    console.log(`[Auto-Routing] Default → minimax-m2.7 [UPDATED_2026_03_05]`);
+    // All other tasks (agentic, tools, chat) → MiniMax M2.7
+    // Primary model for all routing: excellent function calling, no refusals
+    console.log(`[Auto-Routing] Default → minimax-m2.7 [UPDATED_2026_04_12]`);
     return 'minimax-m2.7';
   }
   

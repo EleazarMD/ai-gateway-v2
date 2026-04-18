@@ -128,7 +128,9 @@ async function initializeServices() {
         { id: 'anthropic-default', type: 'anthropic', provider: 'anthropic' },
         { id: 'openai-default', type: 'openai', provider: 'openai' },
         { id: 'google-default', type: 'google', provider: 'google' },
-        { id: 'perplexity-default', type: 'perplexity', provider: 'perplexity' }
+        { id: "perplexity-default", type: "perplexity", provider: "perplexity" },
+        { id: "zhipu-default", type: "openai", provider: "zhipu", endpoint: "https://api.z.ai/api/paas/v4", models: ["glm-5", "glm-5.1"] },
+        { id: "minimax-default", type: "openai", provider: "minimax", endpoint: "http://localhost:8010/v1", models: ["minimax-m2.7", "minimax-m2.5"] }
       ];
       
       for (const providerConfig of providersToLoad) {
@@ -144,7 +146,9 @@ async function initializeServices() {
               id: providerConfig.id,
               type: providerConfig.type,
               apiKey: apiKey,
-              enabled: true
+              enabled: true,
+              ...(providerConfig.endpoint && { endpoint: providerConfig.endpoint }),
+              ...(providerConfig.models && { models: providerConfig.models })
             });
           } else {
             console.log(`⚠️  ${providerConfig.provider} - No API key found in key management`);
@@ -295,14 +299,14 @@ async function initializeServices() {
     console.log('⚠️  Qwen Vision provider failed:', e.message);
   }
   
-  // Load MiniMax M2.7 provider (OpenAI-compatible API via local ik_llama.cpp)
+  // Load MiniMax M2.5 provider (OpenAI-compatible API via local vLLM)
   // MiniMax uses OpenAI chat completions format on port 8010
   if (process.env.MINIMAX_API_KEY) {
     try {
-      console.log('🤖 Loading MiniMax M2.7 provider...');
+      console.log('🤖 Loading MiniMax M2.5 provider...');
       await providerManager.loadProvider({
         id: 'minimax-default',
-        name: 'MiniMax M2.7 (230B MoE)',
+        name: 'MiniMax M2.7',
         type: 'openai',
         apiKey: process.env.MINIMAX_API_KEY,
         endpoint: process.env.MINIMAX_ENDPOINT || 'http://localhost:8010/v1',

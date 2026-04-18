@@ -94,8 +94,10 @@ class OpenAIProvider extends EventEmitter {
       // Check if this is a local endpoint (localhost or 127.0.0.1)
       const isLocalEndpoint = this.endpoint.includes('localhost') || this.endpoint.includes('127.0.0.1');
       
-      // Validate API key format only for external OpenAI API
-      if (!isLocalEndpoint && !this.apiKey.match(/^sk-[A-Za-z0-9-_]{20,}$/)) {
+      // Validate API key format only for standard OpenAI API
+      // Custom endpoints (z.ai, etc.) may use different key formats
+      const isOpenAIEndpoint = this.endpoint.includes('api.openai.com');
+      if (isOpenAIEndpoint && !this.apiKey.match(/^sk-[A-Za-z0-9-_]{20,}$/)) {
         throw new Error('Invalid OpenAI API key format');
       }
       
@@ -129,6 +131,17 @@ class OpenAIProvider extends EventEmitter {
    */
   async loadModelsFromDatabase() {
     try {
+      // If models are explicitly configured (e.g., zhipu, custom endpoints), use those
+      if (this.models && this.models.length > 0 && typeof this.models[0] === 'string') {
+        console.log(`[OpenAI Provider] Using ${this.models.length} models from config`);
+        this.models.forEach(modelId => {
+          if (!this.pricing[modelId]) {
+            this.pricing[modelId] = { input: 0.0001, output: 0.0001 };
+          }
+        });
+        return;
+      }
+      
       // Check if this is a local endpoint - if so, use config models
       const isLocalEndpoint = this.endpoint.includes('localhost') || this.endpoint.includes('127.0.0.1');
       
