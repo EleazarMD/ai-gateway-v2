@@ -209,7 +209,7 @@
       "targetProvider": "google-default",
       "targetModel": "gemini-3-flash-preview",
       "fallbackProviders": [],
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "deep_mode_simple",
@@ -222,7 +222,7 @@
       "targetProvider": "google-default",
       "targetModel": "gemini-3-flash-preview",
       "fallbackProviders": [],
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "tier1_sonnet_complex",
@@ -364,7 +364,7 @@
       "targetProvider": "google-default",
       "targetModel": "gemini-3-flash-preview",
       "fallbackProviders": [],
-      "enabled": true
+      "enabled": false
     },
     {
       "id": "default_minimax_fallback",

@@ -603,6 +603,12 @@ class RoutingEngine extends EventEmitter {
   getAvailableProviders(request) {
     const allProviders = Array.from(this.providerManager.activeProviders.values()).filter(p => p !== null && p !== undefined);
     console.log(`[Routing Engine] Finding providers for model "${request.model}" from ${allProviders.length} active providers`);
+    allProviders.forEach(p => {
+      try {
+        const m = p.getAvailableModels();
+        console.log(`[Routing Engine] DEBUG: provider="${p.name}" id="${p.id}" models=[${m.map(x=>x.id).join(',')}] status=${p.status}`);
+      } catch(e) { console.log(`[Routing Engine] DEBUG: provider="${p.name}" error=${e.message}`); }
+    });
     
     const availableProviders = allProviders.filter(provider => {
       // Safety check - should never happen but just in case

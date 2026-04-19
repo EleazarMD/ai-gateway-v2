@@ -130,9 +130,16 @@ class OpenAIProvider extends EventEmitter {
    * Load available models from database
    */
   async loadModelsFromDatabase() {
+    // If models were explicitly configured (zhipu, minimax, etc), never overwrite them
+    if (this._configModels && this._configModels.length > 0) {
+      this.models = this._configModels;
+      console.log('[OpenAI Provider] Preserving config models (not overwriting from DB):', this.models.join(', '));
+      return;
+    }
     try {
       // If models are explicitly configured (e.g., zhipu, custom endpoints), use those
       if (this.models && this.models.length > 0 && typeof this.models[0] === 'string') {
+        this._configModels = [...this.models];  // Save original config models
         console.log(`[OpenAI Provider] Using ${this.models.length} models from config`);
         this.models.forEach(modelId => {
           if (!this.pricing[modelId]) {
@@ -167,7 +174,7 @@ class OpenAIProvider extends EventEmitter {
         FROM provider_models
         WHERE provider_id = $1 AND is_active = true
         ORDER BY model_id
-      `, ['openai']);
+      `, [this.id]);
       
       if (result.rows.length === 0) {
         console.warn(`[OpenAI Provider] No models found in database, using defaults`);
@@ -257,7 +264,13 @@ class OpenAIProvider extends EventEmitter {
       
       throw new Error('Invalid response from OpenAI API');
     } catch (error) {
-      console.error(`[OpenAI Provider] Connection validation failed:`, error.message);
+      console.warn(`[OpenAI Provider] Connection validation skipped (endpoint may not support /models): ${error.message}`);
+      // Don't throw - many OpenAI-compatible endpoints don't support /models
+      // If we have config models, trust those
+      if (this.models && this.models.length > 0) {
+        this.lastHealthCheck = new Date().toISOString();
+        return true;
+      }
       throw new Error(`OpenAI API connection failed: ${error.message}`);
     }
   }

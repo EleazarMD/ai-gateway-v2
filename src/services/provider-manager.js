@@ -116,7 +116,7 @@ class ProviderManager extends EventEmitter {
       
       // Store provider
       this.providers.set(providerConfig.id, providerConfig);
-      this.activeProviders.set(providerConfig.id, providerInstance);
+      this.activeProviders.set(providerConfig.id, providerInstance); console.log(`[TRACK] activeProviders.set(${providerConfig.id}) size=${this.activeProviders.size} keys=[${Array.from(this.activeProviders.keys()).join(',')}]`);
       
       // Update routing capabilities
       this.updateRoutingCapabilities(providerConfig.id, providerConfig.capabilities);
@@ -188,7 +188,7 @@ class ProviderManager extends EventEmitter {
       const providerInstance = this.activeProviders.get(providerId);
       if (providerInstance) {
         await providerInstance.cleanup();
-        this.activeProviders.delete(providerId);
+        console.log(`[TRACK] activeProviders.delete(${providerId}) STACK:`, new Error().stack.split('\n').slice(1,5).join(' | ')); this.activeProviders.delete(providerId);
       }
       
       this.providers.delete(providerId);
@@ -744,12 +744,12 @@ class ProviderManager extends EventEmitter {
       const currentProviders = new Set(this.activeProviders.keys());
       const newProviders = new Set(config.providers.map(p => p.id));
       
-      // Remove providers that are no longer in config
-      for (const providerId of currentProviders) {
-        if (!newProviders.has(providerId)) {
-          await this.unloadProvider(providerId);
-        }
-      }
+      // NOTE: We intentionally do NOT remove providers that are missing from DB config.
+      // Providers loaded via AI Inferencing Service are authoritative and must not be
+      // wiped by a dashboard config sync. Removals must be explicit/manual.
+      // for (const providerId of currentProviders) {
+      //   if (!newProviders.has(providerId)) { await this.unloadProvider(providerId); }
+      // }
       
       // Load new providers or update existing ones (with resilient error handling)
       const loadErrors = [];
@@ -857,7 +857,7 @@ class ProviderManager extends EventEmitter {
     await Promise.all(cleanupPromises);
     
     this.providers.clear();
-    this.activeProviders.clear();
+    console.log(`[TRACK] activeProviders.clear() STACK:`, new Error().stack.split('\n').slice(1,5).join(' | ')); this.activeProviders.clear();
     this.routingCapabilities.clear();
     this.healthStatus.clear();
     this.removeAllListeners();
