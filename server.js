@@ -324,6 +324,19 @@ async function initializeServices() {
   
   console.log(`\n✅ Loaded ${providerManager.activeProviders.size} providers\n`);
   
+  // -------------------------------------------------------------------
+  // Load model specs (YAML per provider) - single source of truth for
+  // routable model IDs, quirks, pricing, and context windows.
+  // -------------------------------------------------------------------
+  const ModelSpecLoader = require('./src/services/model-spec-loader');
+  const modelSpecs = new ModelSpecLoader();
+  try {
+    await modelSpecs.load();
+    global.__modelSpecs = modelSpecs;
+  } catch (e) {
+    console.error('[ModelSpecLoader] failed:', e.message);
+  }
+
   // Load persistent routing rules from config file
   try {
     const fs = require('fs');
@@ -332,6 +345,42 @@ async function initializeServices() {
     if (fs.existsSync(rulesPath)) {
       const rulesData = JSON.parse(fs.readFileSync(rulesPath, 'utf8'));
       const rules = rulesData.routing_rules || [];
+
+      // --- Auto-populate model ID lists from the spec ---------------------
+      // Rules whose id is in the map below get their `condition.in` list
+      // refreshed from the spec's model catalog for the matching provider.
+      // Stops us from hand-editing routing-rules.json every new release.
+      if (modelSpecs && modelSpecs.models && modelSpecs.models.size > 0) {
+        const ruleIdToProvider = {
+          anthropic_direct: 'anthropic',
+          minimax_local:    'rtx-minimax',
+          zhipu_direct:     'rtx-zhipu',
+          glm_zhipu:        'rtx-zhipu',
+          qwen_vision_local:'rtx-qwen-vision',
+        };
+        for (const rule of rules) {
+          const providerId = ruleIdToProvider[rule.id];
+          if (!providerId) continue;
+          const ids = [];
+          for (const m of modelSpecs.models.values()) {
+            if (m._providerId === providerId) ids.push(m.id);
+          }
+          if (!ids.length) continue;
+          const cond = rule.condition || {};
+          if (Array.isArray(cond.in) && cond.field === 'model') {
+            cond.in = ids;
+          } else if (Array.isArray(cond.in)) {
+            cond.in = ids;
+          } else if (cond.anyOf) {
+            for (const sub of cond.anyOf) {
+              if (sub && sub.field === 'model' && Array.isArray(sub.in)) sub.in = ids;
+            }
+          } else {
+            rule.condition = { field: 'model', in: ids };
+          }
+          console.log('   [spec] rule ' + rule.id + ': ' + ids.length + ' model IDs');
+        }
+      }
       if (rules.length > 0) {
         providerManager.updateRoutingConfig({ routingRules: rules });
         console.log(`✅ Loaded ${rules.length} routing rules from ${rulesPath}`);
