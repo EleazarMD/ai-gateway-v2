@@ -1,0 +1,45 @@
+# ============================================================================
+# OpenAI (official api.openai.com)
+# ============================================================================
+provider:
+  id: openai
+  display_name: OpenAI
+  type: openai
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  inferencing_service:
+    service_id: ai-gateway
+    provider: openai
+
+quirks:
+  upstream_stream: true
+  downstream_stream_mode: passthrough
+
+# Models loaded dynamically from OpenAI's /models endpoint by openai-provider.js.
+# List below is what PiCode's picker shows — keep short and curated.
+models:
+  - id: gpt-5.1
+    display_name: GPT-5.1
+    context_window: 400000
+    max_tokens: 128000
+    pricing:     { input: 2.50, output: 10.00 }
+    capabilities: [text, vision, tools, reasoning]
+    supports_extended_thinking: true
+
+  - id: gpt-5.1-mini
+    display_name: GPT-5.1 Mini
+    context_window: 400000
+    max_tokens: 128000
+    pricing:     { input: 0.15, output: 0.60 }
+    capabilities: [text, vision, tools, reasoning]
+    supports_extended_thinking: true
+
+  - id: o4
+    display_name: o4 (reasoning)
+    context_window: 200000
+    max_tokens: 100000
+    pricing:     { input: 3.00, output: 12.00 }
+    capabilities: [text, reasoning]
+    supports_extended_thinking: true
+    # OpenAI reasoning models don't support streaming / tools / vision / temperature.
+    forbid_params: [stream, temperature, top_p, tools]

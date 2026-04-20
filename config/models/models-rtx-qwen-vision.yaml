@@ -1,0 +1,35 @@
+# ============================================================================
+# RTX Workstation — Qwen Vision (local vLLM on :8792, multimodal)
+# ============================================================================
+provider:
+  id: rtx-qwen-vision
+  display_name: Qwen Vision (RTX local vLLM)
+  type: openai
+  base_url: http://localhost:8792/v1
+  api_key_env: QWEN_VISION_API_KEY
+  inferencing_service:
+    service_id: ai-gateway
+    provider: qwen-vision
+
+quirks:
+  upstream_stream: false
+  downstream_stream_mode: rechunk
+  # Vision-only: clients must send image content parts.
+  requires_image_input: false       # optional, not required; text also works
+
+models:
+  - id: qwen-vision
+    display_name: Qwen 2.5-VL 7B (Instruct)
+    description: Multimodal vision + text instruction model, 128K ctx
+    context_window: 131072
+    max_tokens: 8192
+    pricing:     { input: 0.00, output: 0.00 }
+    capabilities: [text, vision, multimodal]
+
+  - id: Qwen2.5-VL-7B-Instruct
+    display_name: Qwen 2.5-VL 7B (canonical id)
+    context_window: 131072
+    max_tokens: 8192
+    pricing:     { input: 0.00, output: 0.00 }
+    capabilities: [text, vision, multimodal]
+    hidden: true

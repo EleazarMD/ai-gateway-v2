@@ -1,0 +1,93 @@
+# ============================================================================
+# Anthropic model specs for AI Gateway v2
+# Single source of truth for every Anthropic model + its quirks.
+# Loaded by src/services/model-spec-loader.js at gateway startup.
+# ============================================================================
+provider:
+  id: anthropic
+  display_name: Anthropic
+  type: anthropic                  # anthropic-provider.js
+  base_url: https://api.anthropic.com/v1
+  api_key_env: ANTHROPIC_API_KEY   # fallback if AI Inferencing Service has no key
+  inferencing_service:
+    service_id: ai-gateway         # key lookup: (service_id, provider)
+    provider: anthropic
+
+# ----------------------------------------------------------------------------
+# Provider-level quirks applied to EVERY Anthropic request.
+# ----------------------------------------------------------------------------
+quirks:
+  # Anthropic requires temperature=1 (and no top_p/top_k) when extended thinking is on.
+  # Enforced by anthropic-provider.js transformRequest.
+  force_temperature_when_thinking: 1
+  strip_when_thinking: [top_p, top_k]
+
+  # How PiCode's `reasoning_effort` (low/medium/high/xhigh/max) maps to
+  # Anthropic's `thinking.budget_tokens`.
+  reasoning_effort_to_budget_tokens:
+    low: 2048
+    medium: 8192
+    high: 16384
+    xhigh: 32768
+    max: 65536
+
+  # Streaming behavior — Anthropic supports native SSE; we buffer server-side
+  # then re-chunk to the client (so content_block events become delta.reasoning_content).
+  upstream_stream: true
+  downstream_stream_mode: rechunk
+
+# ----------------------------------------------------------------------------
+# Models — each entry becomes a routable model_id on the gateway.
+# ----------------------------------------------------------------------------
+models:
+  - id: claude-haiku-4-5
+    display_name: Claude Haiku 4.5
+    description: Fastest Claude, no extended thinking
+    context_window: 1000000
+    max_tokens: 8192
+    pricing:   { input: 1.00, output: 5.00 }       # $/MTok
+    capabilities: [text, vision, tools, multimodal]
+    supports_extended_thinking: false
+
+  - id: claude-sonnet-4-6
+    display_name: Claude Sonnet 4.6
+    description: Latest Sonnet, 1M context, extended thinking
+    context_window: 1000000
+    max_tokens: 65536
+    pricing:   { input: 3.00, output: 15.00 }
+    capabilities: [text, vision, tools, multimodal, extended_thinking, computer_use]
+    supports_extended_thinking: true
+
+  - id: claude-opus-4-7
+    display_name: Claude Opus 4.7
+    description: Most capable model, extended thinking (low/medium/high/xhigh/max)
+    context_window: 200000
+    max_tokens: 128000
+    pricing:   { input: 15.00, output: 75.00 }
+    capabilities: [text, vision, tools, multimodal, extended_thinking, computer_use]
+    supports_extended_thinking: true
+    # Opus supports an extra 'xhigh' effort tier above the default map
+    reasoning_effort_to_budget_tokens:
+      low: 2048
+      medium: 8192
+      high: 16384
+      xhigh: 32768
+      max: 65536
+
+  # Legacy / dated aliases — kept for back-compat, hidden from PiCode picker.
+  - id: claude-sonnet-4-5-20250929
+    display_name: Claude Sonnet 4.5
+    context_window: 200000
+    max_tokens: 8192
+    pricing:   { input: 3.00, output: 15.00 }
+    capabilities: [text, vision, tools, multimodal, extended_thinking, computer_use]
+    supports_extended_thinking: true
+    hidden: true
+  - id: claude-haiku-4-5-20251001
+    display_name: Claude Haiku 4.5 (dated)
+    context_window: 1000000
+    max_tokens: 8192
+    pricing:   { input: 1.00, output: 5.00 }
+    capabilities: [text, vision, tools, multimodal]
+    supports_extended_thinking: false
+    hidden: true

@@ -1,0 +1,40 @@
+# ============================================================================
+# RTX Workstation — ZhipuAI (GLM-5 series, routed via api.z.ai)
+# Routed through gateway even though upstream is public, for unified auth/cost.
+# ============================================================================
+provider:
+  id: rtx-zhipu
+  display_name: ZhipuAI (GLM series)
+  type: openai                      # openai-completions compatible
+  base_url: https://api.z.ai/api/paas/v4
+  api_key_env: ZAI_API_KEY
+  inferencing_service:
+    service_id: ai-gateway
+    provider: zhipu
+
+quirks:
+  upstream_stream: false
+  downstream_stream_mode: rechunk
+  # GLM-5 supports `thinking: { type: disabled|enabled }` — default off for speed.
+  extra_body:
+    thinking: { type: disabled }
+    language: en
+
+models:
+  - id: glm-5
+    display_name: GLM-5
+    description: ZhipuAI GLM-5, strong general + coding model, 128K ctx
+    context_window: 128000
+    max_tokens: 16384
+    pricing:     { input: 0.00, output: 0.00 }
+    capabilities: [text, tools]
+    supports_extended_thinking: false
+
+  - id: glm-5.1
+    display_name: GLM-5.1
+    description: GLM-5.1 incremental release
+    context_window: 128000
+    max_tokens: 16384
+    pricing:     { input: 0.00, output: 0.00 }
+    capabilities: [text, tools]
+    supports_extended_thinking: false

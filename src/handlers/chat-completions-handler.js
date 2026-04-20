@@ -580,9 +580,11 @@ class ChatCompletionsHandler {
    * This is a fallback when the provider doesn't support native streaming
    */
   async convertNonStreamingToSSE(res, response, model, traceId, timestamp) {
-    // Extract content and tool_calls from response
-    const content = this.extractContentFromResponse(response);
-    const toolCalls = response?.choices?.[0]?.message?.tool_calls || null;
+    // Extract content, reasoning_content, and tool_calls from response
+    const message = response?.choices?.[0]?.message;
+    const reasoningContent = message?.reasoning_content || message?.reasoning || message?.reasoning_text || null;
+    const content = (message?.content === undefined || message?.content === null) ? this.extractContentFromResponse(response, {includeReasoning:false}) : message.content;
+    const toolCalls = message?.tool_calls || null;
     
     // If there are tool calls, send them in a single chunk
     if (toolCalls && toolCalls.length > 0) {
@@ -601,7 +603,47 @@ class ChatCompletionsHandler {
         }]
       };
       res.write(`data: ${JSON.stringify(roleChunk)}\n\n`);
-      
+
+      // Emit reasoning_content BEFORE tool_calls so the thinking card renders
+      // in agentic workflows where every assistant message carries tools.
+      if (reasoningContent && reasoningContent.length > 0) {
+        const chunkSize = 256;
+        for (let i = 0; i < reasoningContent.length; i += chunkSize) {
+          const chunkText = reasoningContent.slice(i, i + chunkSize);
+          const rChunk = {
+            id: `chatcmpl-${traceId}-r${Math.floor(i / chunkSize)}`,
+            object: 'chat.completion.chunk',
+            created: timestamp,
+            model: model,
+            choices: [{
+              index: 0,
+              delta: { reasoning_content: chunkText },
+              finish_reason: null
+            }]
+          };
+          res.write(`data: ${JSON.stringify(rChunk)}\n\n`);
+        }
+      }
+      // Emit text content (if any) before tool_calls
+      if (content && content.length > 0) {
+        const chunkSize = 256;
+        for (let i = 0; i < content.length; i += chunkSize) {
+          const chunkText = content.slice(i, i + chunkSize);
+          const cChunk = {
+            id: `chatcmpl-${traceId}-c${Math.floor(i / chunkSize)}`,
+            object: 'chat.completion.chunk',
+            created: timestamp,
+            model: model,
+            choices: [{
+              index: 0,
+              delta: { content: chunkText },
+              finish_reason: null
+            }]
+          };
+          res.write(`data: ${JSON.stringify(cChunk)}\n\n`);
+        }
+      }
+
       // Tool calls chunk
       const toolCallChunk = {
         id: `chatcmpl-${traceId}-1`,
@@ -634,15 +676,51 @@ class ChatCompletionsHandler {
       return;
     }
     
-    // Handle text content (original logic)
-    if (!content) {
+    // Emit reasoning_content as delta.reasoning_content chunks first (for thinking display)
+    if (reasoningContent && reasoningContent.length > 0) {
+      const chunkSize = 256;
+      for (let i = 0; i < reasoningContent.length; i += chunkSize) {
+        const chunkText = reasoningContent.slice(i, i + chunkSize);
+        const chunk = {
+          id: `chatcmpl-${traceId}-r${Math.floor(i / chunkSize)}`,
+          object: 'chat.completion.chunk',
+          created: timestamp,
+          model: model,
+          choices: [{
+            index: 0,
+            delta: i === 0 ? { role: 'assistant', reasoning_content: chunkText } : { reasoning_content: chunkText },
+            finish_reason: null
+          }]
+        };
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+    }
+
+    // Handle text content
+    if (!content && !reasoningContent) {
       res.write('data: [DONE]\n\n');
       res.end();
       return;
     }
     
+    if (!content) {
+      // Only reasoning, no content — send final chunk
+      const finalChunk = {
+        id: `chatcmpl-${traceId}-final`,
+        object: 'chat.completion.chunk',
+        created: timestamp,
+        model: model,
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+      };
+      res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+
     // Split content into chunks (simulate streaming) without reformatting
-    const chunkSize = 48; // Characters per chunk
+    const chunkSize = 48;
     let streamedText = '';
     
     for (let i = 0; i < content.length; i += chunkSize) {
@@ -656,7 +734,7 @@ class ChatCompletionsHandler {
         model: model,
         choices: [{
           index: 0,
-          delta: i === 0 ? { role: 'assistant', content: chunkText } : { content: chunkText },
+          delta: i === 0 && !reasoningContent ? { role: 'assistant', content: chunkText } : { content: chunkText },
           finish_reason: null
         }]
       };
@@ -981,14 +1059,14 @@ class ChatCompletionsHandler {
   /**
    * Extract content from full response
    */
-  extractContentFromResponse(response) {
+  extractContentFromResponse(response, options = { includeReasoning: true }) {
     if (!response) return '';
     if (typeof response === 'string') return response;
     if (response.choices && response.choices[0]) {
       const choice = response.choices[0];
-      if (choice.message?.content) return choice.message.content;
-      // DeepSeek/MiniMax reasoning models put output in reasoning_content
-      if (choice.message?.reasoning_content) return choice.message.reasoning_content;
+      if (choice.message?.content != null && choice.message.content !== "") return choice.message.content;
+      // For non-SSE callers that specifically want reasoning-as-content (opt-in only)
+      if (options.includeReasoning && choice.message?.reasoning_content) return choice.message.reasoning_content;
       if (choice.text) return choice.text;
     }
     if (response.content) return response.content;

@@ -1,7 +1,7 @@
 /**
- * XRT Workstation Provider
+ * RTX Workstation Provider
  * 
- * Handles routing to NVIDIA NIM models running on XRT workstation
+ * Handles routing to NVIDIA NIM models running on RTX workstation
  * Models: Llama 3.1 70B, Llama 3.3 70B, Mistral 7B, NV-EmbedQA-E5-v5
  * 
  * Architecture: NVIDIA NIM containers
@@ -14,11 +14,11 @@
 const fetch = require('node-fetch');
 const logger = require('../../utils/logger');
 
-class XRTProvider {
+class RTXProvider {
   constructor(db) {
     this.db = db;
-    this.providerId = 'xrt-workstation';
-    this.providerName = 'XRT Workstation (NVIDIA NIM)';
+    this.providerId = 'rtx-workstation';
+    this.providerName = 'RTX Workstation (NVIDIA NIM)';
     this.tailscaleIp = '100.108.41.22';  // Tailscale IP
     this.models = new Map();
     this.endpoints = new Map();
@@ -29,7 +29,7 @@ class XRTProvider {
    */
   async initialize() {
     try {
-      logger.info(`[XRT Provider] Initializing...`);
+      logger.info(`[RTX Provider] Initializing...`);
       
       // Load models from database
       const modelsResult = await this.db.query(`
@@ -71,7 +71,7 @@ class XRTProvider {
           baseUrl: `http://${tailscaleIp}:${port}`
         });
         
-        logger.info(`[XRT Provider] Registered model ${model.model_id} at ${tailscaleIp}:${port}`);
+        logger.info(`[RTX Provider] Registered model ${model.model_id} at ${tailscaleIp}:${port}`);
       });
 
       // Store endpoints
@@ -85,12 +85,12 @@ class XRTProvider {
         }
       });
 
-      logger.info(`[XRT Provider] Loaded ${this.models.size} models from database`);
-      logger.info(`[XRT Provider] Models: ${Array.from(this.models.keys()).join(', ')}`);
+      logger.info(`[RTX Provider] Loaded ${this.models.size} models from database`);
+      logger.info(`[RTX Provider] Models: ${Array.from(this.models.keys()).join(', ')}`);
       
       return true;
     } catch (error) {
-      logger.error(`[XRT Provider] Initialization failed:`, error);
+      logger.error(`[RTX Provider] Initialization failed:`, error);
       return false;
     }
   }
@@ -102,7 +102,7 @@ class XRTProvider {
     return Array.from(this.models.values()).map(model => ({
       id: model.id,
       object: 'model',
-      owned_by: 'xrt-workstation',
+      owned_by: 'rtx-workstation',
       displayName: model.displayName,
       capabilities: model.capabilities,
       pricing: {
@@ -128,7 +128,7 @@ class XRTProvider {
       path: '/v1/chat/completions'
     };
     
-    logger.info(`[XRT Provider] Using endpoint: ${endpoint.baseUrl}${endpoint.path} for ${modelId}`);
+    logger.info(`[RTX Provider] Using endpoint: ${endpoint.baseUrl}${endpoint.path} for ${modelId}`);
     return endpoint;
   }
 
@@ -140,8 +140,8 @@ class XRTProvider {
       const endpoint = await this.getEndpointForModel(model);
       const url = `${endpoint.baseUrl}${endpoint.path}`;
 
-      logger.info(`[XRT Provider] Sending request to ${url}`);
-      logger.debug(`[XRT Provider] Model: ${model}, Messages: ${messages.length}`);
+      logger.info(`[RTX Provider] Sending request to ${url}`);
+      logger.debug(`[RTX Provider] Model: ${model}, Messages: ${messages.length}`);
 
       // NIM uses OpenAI-compatible API
       const requestBody = {
@@ -165,16 +165,16 @@ class XRTProvider {
 
       if (!response.ok) {
         const errorText = await response.text();
-        logger.error(`[XRT Provider] Request failed: ${response.status} ${errorText}`);
+        logger.error(`[RTX Provider] Request failed: ${response.status} ${errorText}`);
         throw new Error(`XRT request failed: ${response.status} ${errorText}`);
       }
 
       const data = await response.json();
-      logger.info(`[XRT Provider] Request successful`);
+      logger.info(`[RTX Provider] Request successful`);
       
       return data;
     } catch (error) {
-      logger.error(`[XRT Provider] Error:`, error);
+      logger.error(`[RTX Provider] Error:`, error);
       throw error;
     }
   }
@@ -187,7 +187,7 @@ class XRTProvider {
       const endpoint = await this.getEndpointForModel(model);
       const url = `${endpoint.baseUrl}${endpoint.path}`;
 
-      logger.info(`[XRT Provider] Streaming request to ${url}`);
+      logger.info(`[RTX Provider] Streaming request to ${url}`);
 
       const requestBody = {
         model: model,
@@ -220,12 +220,12 @@ class XRTProvider {
       });
 
       response.body.on('error', (error) => {
-        logger.error(`[XRT Provider] Streaming error:`, error);
+        logger.error(`[RTX Provider] Streaming error:`, error);
         responseStream.end();
       });
 
     } catch (error) {
-      logger.error(`[XRT Provider] Streaming error:`, error);
+      logger.error(`[RTX Provider] Streaming error:`, error);
       throw error;
     }
   }
@@ -245,4 +245,4 @@ class XRTProvider {
   }
 }
 
-module.exports = XRTProvider;
+module.exports = RTXProvider;

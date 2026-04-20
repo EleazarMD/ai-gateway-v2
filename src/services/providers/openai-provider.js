@@ -405,7 +405,7 @@ class OpenAIProvider extends EventEmitter {
         message: {
           role: choice.message.role,
           // MiniMax/DeepSeek reasoning models return reasoning_content instead of content
-          content: choice.message.content || choice.message.reasoning_content || null,
+          content: choice.message.content || null,  // do NOT fall back to reasoning_content — SSE emits reasoning separately
           reasoning_content: choice.message.reasoning_content,
           function_call: choice.message.function_call,
           tool_calls: choice.message.tool_calls

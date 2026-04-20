@@ -1,0 +1,36 @@
+# ============================================================================
+# RTX Workstation — MiniMax (local llama-server on :8010)
+# ============================================================================
+provider:
+  id: rtx-minimax
+  display_name: MiniMax (RTX local vLLM)
+  type: openai                      # handled by openai-provider.js
+  base_url: http://localhost:8010/v1
+  api_key_env: MINIMAX_API_KEY      # llama-server ignores auth; value is cosmetic
+  inferencing_service:
+    service_id: ai-gateway
+    provider: minimax
+
+quirks:
+  # llama-server streams reasoning natively in `delta.reasoning_content`.
+  # openai-provider.js forces `stream:false` upstream and the gateway re-chunks
+  # the non-streaming response into SSE. Do NOT fall back content <- reasoning_content
+  # (would duplicate reasoning as content chunks — bug fixed Apr 2026).
+  upstream_stream: false
+  downstream_stream_mode: rechunk
+  content_fallback_to_reasoning: false
+  # When tool_calls are present, still emit reasoning_content chunks FIRST so
+  # the chat UI's thinking card populates even in agentic turns.
+  emit_reasoning_before_tool_calls: true
+
+models:
+  - id: minimax-m2.7
+    display_name: MiniMax M2.7 (Medium)
+    description: Reasoning model, openai-completions compatible, tool calls, 131K ctx
+    context_window: 131072
+    max_tokens: 8192
+    pricing:     { input: 0.00, output: 0.00 }
+    capabilities: [text, tools, reasoning]
+    supports_extended_thinking: true
+    # Reasoning is always on in llama-server's minimax-m2 template.
+    # reasoning_effort has no upstream knob; expose for UI parity only.

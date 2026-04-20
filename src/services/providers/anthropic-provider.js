@@ -134,13 +134,73 @@ class AnthropicProvider extends EventEmitter {
         capabilities: ['text', 'vision', 'tools', 'multimodal', 'extended_thinking', 'computer_use']
       },
       'claude-sonnet-4-5': {
-        id: 'claude-sonnet-4-5-20250929',  // Claude Sonnet 4.5 (Sep 2025 release)
+        id: 'claude-sonnet-4-5-20250929',
         name: 'Claude Sonnet 4.5',
         description: 'Most intelligent Sonnet model with advanced reasoning and coding',
         maxTokens: 8192,
         contextWindow: 200000,
-        inputPricing: 3.00,   // $3/MTok
-        outputPricing: 15.00, // $15/MTok
+        inputPricing: 3.00,
+        outputPricing: 15.00,
+        capabilities: ['text', 'vision', 'tools', 'multimodal', 'extended_thinking', 'computer_use']
+      },
+      'claude-sonnet-4-6': {
+        id: 'claude-sonnet-4-6',
+        name: 'Claude Sonnet 4.6',
+        description: 'Latest Sonnet with 1M context and extended thinking',
+        maxTokens: 65536,
+        contextWindow: 1000000,
+        inputPricing: 3.00,
+        outputPricing: 15.00,
+        capabilities: ['text', 'vision', 'tools', 'multimodal', 'extended_thinking', 'computer_use']
+      },
+      'claude-opus-4-7': {
+        id: 'claude-opus-4-7',
+        name: 'Claude Opus 4.7',
+        description: 'Most capable Opus with extended thinking (low/medium/high/xhigh/max)',
+        maxTokens: 128000,
+        contextWindow: 200000,
+        inputPricing: 15.00,
+        outputPricing: 75.00,
+        capabilities: ['text', 'vision', 'tools', 'multimodal', 'extended_thinking', 'computer_use']
+      },
+      'claude-opus-4-6': {
+        id: 'claude-opus-4-6',
+        name: 'Claude Opus 4.6',
+        description: 'Opus 4.6 with extended thinking',
+        maxTokens: 65536,
+        contextWindow: 200000,
+        inputPricing: 15.00,
+        outputPricing: 75.00,
+        capabilities: ['text', 'vision', 'tools', 'multimodal', 'extended_thinking', 'computer_use']
+      },
+      'claude-opus-4-5-20251101': {
+        id: 'claude-opus-4-5-20251101',
+        name: 'Claude Opus 4.5',
+        description: 'Opus 4.5 (Nov 2025 release)',
+        maxTokens: 32768,
+        contextWindow: 200000,
+        inputPricing: 15.00,
+        outputPricing: 75.00,
+        capabilities: ['text', 'vision', 'tools', 'multimodal', 'extended_thinking', 'computer_use']
+      },
+      'claude-haiku-4-5-20251001': {
+        id: 'claude-haiku-4-5-20251001',
+        name: 'Claude Haiku 4.5 (dated)',
+        description: 'Fast, cheap Haiku 4.5',
+        maxTokens: 8192,
+        contextWindow: 1000000,
+        inputPricing: 1.00,
+        outputPricing: 5.00,
+        capabilities: ['text', 'vision', 'tools', 'multimodal']
+      },
+      'claude-sonnet-4-5-20250929': {
+        id: 'claude-sonnet-4-5-20250929',
+        name: 'Claude Sonnet 4.5 (dated)',
+        description: 'Dated alias of Sonnet 4.5',
+        maxTokens: 8192,
+        contextWindow: 200000,
+        inputPricing: 3.00,
+        outputPricing: 15.00,
         capabilities: ['text', 'vision', 'tools', 'multimodal', 'extended_thinking', 'computer_use']
       }
     };
@@ -414,6 +474,9 @@ class AnthropicProvider extends EventEmitter {
             name: block.name,
             input: ''
           };
+        } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+          contentBlocks[index].data = '';
+          contentBlocks[index].signature = '';
         }
       } else if (eventData.type === 'content_block_delta') {
         const index = eventData.index;
@@ -428,6 +491,11 @@ class AnthropicProvider extends EventEmitter {
           // Text content
           contentBlocks[index].data += delta.text;
           console.log(`[Anthropic Provider] content_block_delta[${index}] text - added ${delta.text.length} chars`);
+        } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+          contentBlocks[index].data += delta.thinking;
+          console.log(`[Anthropic Provider] content_block_delta[${index}] thinking - added ${delta.thinking.length} chars`);
+        } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') {
+          contentBlocks[index].signature = (contentBlocks[index].signature || '') + delta.signature;
         } else if (delta.type === 'input_json_delta' && delta.partial_json) {
           // Tool call input (JSON fragments)
           contentBlocks[index].data.input += delta.partial_json;
@@ -479,6 +547,13 @@ class AnthropicProvider extends EventEmitter {
           input: parsedInput
         });
         console.log(`[Anthropic Provider] Final content[${index}]: tool_use (${block.data.name})`);
+      } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+        content.push({
+          type: block.type,
+          thinking: block.data || '',
+          signature: block.signature || ''
+        });
+        console.log(`[Anthropic Provider] Final content[${index}]: ${block.type} (${(block.data||'').length} chars)`);
       }
     }
     
@@ -655,9 +730,35 @@ The above is the output from the ${toolName} tool. This is factual, real-time in
       }
     }
 
-    // Handle extended thinking for supported models
-    if (modelConfig.capabilities.includes('extended_thinking') && request.thinking) {
-      anthropicRequest.thinking = request.thinking;
+    // Handle extended thinking for supported models.
+    // Accept either Anthropic-native `thinking` param OR OpenAI-style `reasoning_effort`
+    // (which is what pi-agent-cli / PiCode send when the user picks a reasoning level).
+    if (modelConfig.capabilities.includes('extended_thinking')) {
+      if (request.thinking) {
+        anthropicRequest.thinking = request.thinking;
+      } else if (request.reasoning_effort || request.reasoningEffort) {
+        const effortToBudget = {
+          low: 2048,
+          medium: 8192,
+          high: 16384,
+          xhigh: 32768,
+          max: 65536,
+        };
+        const effort = String(request.reasoning_effort || request.reasoningEffort).toLowerCase();
+        const budget = effortToBudget[effort] || effortToBudget.medium;
+        anthropicRequest.thinking = { type: 'enabled', budget_tokens: budget };
+        // Anthropic requires max_tokens > budget_tokens when thinking is enabled
+        if (!anthropicRequest.max_tokens || anthropicRequest.max_tokens <= budget) {
+          anthropicRequest.max_tokens = budget + 4096;
+        }
+        console.log(`[Anthropic Provider] reasoning_effort=${effort} -> thinking.budget_tokens=${budget}`);
+      }
+      // Anthropic requires temperature=1 when thinking is enabled
+      if (anthropicRequest.thinking) {
+        anthropicRequest.temperature = 1;
+        delete anthropicRequest.top_p;
+        delete anthropicRequest.top_k;
+      }
     }
 
     // Handle streaming
@@ -703,7 +804,17 @@ The above is the output from the ${toolName} tool. This is factual, real-time in
     if (anthropicResponse.content && anthropicResponse.content.length > 0) {
       const textBlocks = anthropicResponse.content.filter(block => block.type === 'text');
       const toolBlocks = anthropicResponse.content.filter(block => block.type === 'tool_use');
-      
+      const thinkingBlocks = anthropicResponse.content.filter(block => block.type === 'thinking' || block.type === 'redacted_thinking');
+
+      // Preserve extended-thinking content in OpenAI-style `reasoning_content`
+      // so downstream clients (pi-agent-cli, PiCode) can render the thinking card.
+      if (thinkingBlocks.length > 0) {
+        response.choices[0].message.reasoning_content = thinkingBlocks
+          .map(block => block.thinking || block.text || '')
+          .filter(Boolean)
+          .join('\n');
+      }
+
       // Set text content if any text blocks exist
       if (textBlocks.length > 0) {
         response.choices[0].message.content = textBlocks.map(block => block.text).join('\n');

@@ -1,0 +1,62 @@
+# ============================================================================
+# Perplexity (Sonar web-search models)
+# ============================================================================
+provider:
+  id: perplexity
+  display_name: Perplexity Sonar
+  type: perplexity                  # handled by perplexity-provider.js
+  base_url: https://api.perplexity.ai
+  api_key_env: PERPLEXITY_API_KEY
+  inferencing_service:
+    service_id: ai-gateway
+    provider: perplexity
+
+quirks:
+  upstream_stream: true
+  downstream_stream_mode: passthrough
+  # Sonar always returns citations; the provider forwards them as metadata
+  # in the final chunk.
+  emits_citations: true
+
+models:
+  - id: sonar
+    display_name: Perplexity Sonar (Fast)
+    description: Fast web-grounded search + synthesis
+    context_window: 128000
+    max_tokens: 8192
+    pricing:     { input: 1.00, output: 1.00 }
+    capabilities: [text, web_search, citations]
+
+  - id: sonar-pro
+    display_name: Perplexity Sonar Pro (Deep)
+    description: Deeper web-grounded research, higher recall
+    context_window: 128000
+    max_tokens: 8192
+    pricing:     { input: 3.00, output: 15.00 }
+    capabilities: [text, web_search, citations]
+
+  - id: sonar-reasoning
+    display_name: Perplexity Sonar Reasoning
+    description: Web search with reasoning steps
+    context_window: 128000
+    max_tokens: 8192
+    pricing:     { input: 1.00, output: 5.00 }
+    capabilities: [text, web_search, citations, reasoning]
+    supports_extended_thinking: true
+
+  - id: sonar-reasoning-pro
+    display_name: Perplexity Sonar Reasoning Pro
+    description: Deep web research with reasoning
+    context_window: 128000
+    max_tokens: 8192
+    pricing:     { input: 2.00, output: 8.00 }
+    capabilities: [text, web_search, citations, reasoning]
+    supports_extended_thinking: true
+
+  - id: sonar-deep-research
+    display_name: Perplexity Sonar Deep Research
+    description: Long-horizon multi-source research
+    context_window: 128000
+    max_tokens: 8192
+    pricing:     { input: 2.00, output: 8.00 }
+    capabilities: [text, web_search, citations, long_context]

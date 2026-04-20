@@ -1,0 +1,41 @@
+# ============================================================================
+# Google (Gemini via Generative Language API)
+# ============================================================================
+provider:
+  id: google
+  display_name: Google Gemini
+  type: google                      # handled by google-provider.js
+  base_url: https://generativelanguage.googleapis.com/v1beta
+  api_key_env: GOOGLE_API_KEY
+  inferencing_service:
+    service_id: ai-gateway
+    provider: google
+
+quirks:
+  upstream_stream: true
+  downstream_stream_mode: rechunk   # google-provider.js converts to OpenAI SSE
+  # Gemini uses `thinking_config: { thinking_budget: N }` natively.
+  reasoning_effort_to_thinking_budget:
+    low: 2048
+    medium: 8192
+    high: 24576
+    max: 32768
+
+models:
+  - id: gemini-3-flash-preview
+    display_name: Gemini 3 Flash
+    description: Fast 1M-context model, native thinking
+    context_window: 1000000
+    max_tokens: 65536
+    pricing:     { input: 0.15, output: 0.60 }
+    capabilities: [text, vision, tools, multimodal, extended_thinking, long_context]
+    supports_extended_thinking: true
+
+  - id: gemini-3.1-pro-preview
+    display_name: Gemini 3.1 Pro
+    description: Flagship, 1M context, native thinking
+    context_window: 1000000
+    max_tokens: 65536
+    pricing:     { input: 1.25, output: 5.00 }
+    capabilities: [text, vision, tools, multimodal, extended_thinking, long_context]
+    supports_extended_thinking: true
